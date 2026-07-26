@@ -228,7 +228,7 @@ fn read_netscape_cookie(path: &Path) -> Result<String> {
             let domain = parts
                 .first()
                 .map(|value| value.trim_start_matches("#HttpOnly_"))?;
-            (parts.len() >= 7 && (domain == "osu.ppy.sh" || domain.ends_with(".osu.ppy.sh")))
+            (parts.len() >= 7 && (domain == "ppy.sh" || domain.ends_with(".ppy.sh")))
                 .then(|| format!("{}={}", parts[5], parts[6]))
         })
         .collect::<Vec<_>>();
@@ -259,6 +259,20 @@ mod tests {
         std::fs::write(
             path.path(),
             "# Netscape HTTP Cookie File\n#HttpOnly_.osu.ppy.sh\tTRUE\t/\tTRUE\t0\tosu_session\tsecret\n",
+        )
+        .unwrap();
+        assert_eq!(
+            super::read_netscape_cookie(path.path()).unwrap(),
+            "osu_session=secret"
+        );
+    }
+
+    #[test]
+    fn accepts_parent_ppy_domain_cookie_lines() {
+        let path = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            path.path(),
+            ".ppy.sh\tTRUE\t/\tTRUE\t0\tosu_session\tsecret\n",
         )
         .unwrap();
         assert_eq!(
