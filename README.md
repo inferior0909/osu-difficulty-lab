@@ -9,6 +9,7 @@ An independent Rust research library and CLI for creating a reproducible five-di
 - Reading is a versioned 400 ms density × AR-pressure baseline.
 - Overlap measures visible spatial interference, stacks, slider-path proximity, order ambiguity, and movement crossings.
 - Raw records, normalized records, SQLite metadata, a persisted HNSW main index, and a delta-index placeholder remain local. Source beatmap archives are transient.
+- Official Packs may be ZIP or 7z containers; both are processed without extracting unrelated media to disk. Very early maps with no official `BeatmapID` receive a deterministic SHA-256-derived local ID.
 
 ## Analysis version
 

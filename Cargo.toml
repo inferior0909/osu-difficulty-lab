@@ -31,6 +31,7 @@ rosu-map = "0.2.1"
 rosu-pp = "4.0.1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
+sevenz-rust = { version = "0.6.1", default-features = false }
 sha2 = "0.10"
 space = { version = "0.17", features = ["alloc", "serde"] }
 thiserror = "2.0"

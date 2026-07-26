@@ -6,6 +6,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use reqwest::{blocking::Client, header::COOKIE};
+use sevenz_rust::{Error as SevenZError, decompress_file_with_extract_fn};
 use zip::ZipArchive;
 
 use crate::{Analyzer, FeatureStore};
@@ -69,10 +70,18 @@ impl PackImporter {
         if store.pack_is_complete(pack_id)? {
             return Ok(PackImportReport::default());
         }
+        let temporary = store.root().join("tmp").join(format!("{pack_id}.part"));
+        if temporary.is_file() {
+            store.mark_pack(pack_id, &temporary.to_string_lossy(), "processing", None)?;
+            if let Ok(report) = self.import_archive(store, analyzer, &temporary) {
+                fs::remove_file(&temporary)?;
+                store.mark_pack(pack_id, "local-retry", "complete", None)?;
+                return Ok(report);
+            }
+        }
         let cookie = read_netscape_cookie(cookie_file)?;
         let url = self.resolve_pack_download_url(pack_id, &cookie)?;
         store.mark_pack(pack_id, &url, "downloading", None)?;
-        let temporary = store.root().join("tmp").join(format!("{pack_id}.part"));
         let response = self
             .client
             .get(&url)
@@ -109,6 +118,12 @@ impl PackImporter {
         analyzer: &Analyzer,
         archive_path: &Path,
     ) -> Result<PackImportReport> {
+        let mut signature = [0_u8; 6];
+        File::open(archive_path)?.read_exact(&mut signature)?;
+        if signature == *b"7z\xBC\xAF\x27\x1C" {
+            return self.import_7z(store, analyzer, archive_path);
+        }
+
         let file = File::open(archive_path)
             .with_context(|| format!("open archive {}", archive_path.display()))?;
         let mut archive = ZipArchive::new(file)?;
@@ -128,6 +143,42 @@ impl PackImporter {
         }
         if report.processed == 0 {
             bail!("official pack archive contains no .osu beatmaps");
+        }
+        Ok(report)
+    }
+
+    fn import_7z(
+        &self,
+        store: &mut FeatureStore,
+        analyzer: &Analyzer,
+        archive_path: &Path,
+    ) -> Result<PackImportReport> {
+        let mut report = PackImportReport::default();
+        let scratch = store.root().join("tmp").join("7z-scratch");
+        decompress_file_with_extract_fn(archive_path, scratch, |entry, reader, _destination| {
+            let name = entry.name().to_ascii_lowercase();
+            if entry.is_directory() {
+                return Ok(true);
+            }
+            if name.ends_with(".osu") || name.ends_with(".osz") {
+                let mut bytes = Vec::with_capacity(entry.size() as usize);
+                reader.read_to_end(&mut bytes).map_err(SevenZError::io)?;
+                if name.ends_with(".osu") {
+                    self.import_beatmap(store, analyzer, &bytes, &mut report);
+                } else if self
+                    .import_osz(store, analyzer, &bytes, &mut report)
+                    .is_err()
+                {
+                    report.failed += 1;
+                }
+            } else {
+                std::io::copy(reader, &mut std::io::sink()).map_err(SevenZError::io)?;
+            }
+            Ok(true)
+        })
+        .with_context(|| format!("extract 7z archive {}", archive_path.display()))?;
+        if report.processed == 0 {
+            bail!("official 7z pack archive contains no .osu beatmaps");
         }
         Ok(report)
     }

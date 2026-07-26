@@ -507,14 +507,20 @@ fn parse_beatmap(bytes: &[u8]) -> Result<ParsedBeatmap> {
             .partial_cmp(&right.time)
             .unwrap_or(Ordering::Equal)
     });
+    let digest = sha2::Sha256::digest(bytes);
+    // Very early official packs predate BeatmapID/BeatmapSetID metadata. Keep them
+    // queryable with a deterministic local ID while retaining the full checksum.
     if beatmap_id == 0 {
-        bail!("beatmap metadata is missing BeatmapID");
+        beatmap_id = u64::from_le_bytes(digest[..8].try_into().expect("SHA-256 prefix"));
+        if beatmap_id == 0 {
+            beatmap_id = 1;
+        }
     }
     Ok(ParsedBeatmap {
         metadata: BeatmapMetadata {
             beatmap_id,
             beatmapset_id,
-            checksum: hex::encode(sha2::Sha256::digest(bytes)),
+            checksum: hex::encode(digest),
             artist,
             title,
             version,
