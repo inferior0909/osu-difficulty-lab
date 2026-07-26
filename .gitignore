@@ -5,4 +5,5 @@
 *.sqlite
 *.cookie
 cookies.txt
+*cookies*.txt
 *.csv
