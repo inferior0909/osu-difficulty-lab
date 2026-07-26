@@ -40,6 +40,12 @@ Export your logged-in `osu.ppy.sh` cookies in Netscape format, keep that file ou
 .\scripts\import-official-packs.ps1 -CookieFile C:\secure\osu-cookies.txt -Release
 ```
 
+The importer accepts normal `osu.ppy.sh`, `.osu.ppy.sh`, and Netscape `#HttpOnly_.osu.ppy.sh` Cookie rows. Validate an export before starting a long batch:
+
+```powershell
+cargo run -- validate-cookie --cookie-file C:\secure\osu-cookies.txt
+```
+
 The script retrieves the official Pack catalogue, opens each official Pack page with the supplied session to obtain its signed download URL, then processes packs sequentially. It preserves only `data\official-pack-ids.txt`, the analysis/index database, and `data\failed-pack-ids.txt` when needed. Each successfully committed archive is deleted before the next Pack begins; already-complete Pack IDs are skipped on a later run. Use `-RefreshCatalog` to fetch the list again, or `-BatchSize 1` (the default) for the lowest temporary disk use.
 
 Training export is available as `export-parquet` (and a lightweight `export-csv`). The normalized binary feature store is the canonical query data; generated data directories, archives, cookie files, and exports are ignored by Git.

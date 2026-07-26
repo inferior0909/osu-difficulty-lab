@@ -31,6 +31,11 @@ impl PackImporter {
         Ok(Self { client })
     }
 
+    pub fn validate_cookie_file(&self, cookie_file: &Path) -> Result<()> {
+        let _ = &self.client;
+        read_netscape_cookie(cookie_file).map(|_| ())
+    }
+
     /// Fetch all official pack catalogue pages. The caller can persist or review the returned IDs before downloading.
     pub fn sync_catalog(&self, pack_types: &[&str]) -> Result<Vec<String>> {
         let mut ids = Vec::new();
@@ -213,15 +218,24 @@ fn read_netscape_cookie(path: &Path) -> Result<String> {
     let content = fs::read_to_string(path).context("read cookie file")?;
     let values = content
         .lines()
-        .filter(|line| !line.trim_start().starts_with('#'))
+        // Netscape uses `#HttpOnly_` as a data-line prefix, not a comment.
+        .filter(|line| {
+            let trimmed = line.trim_start();
+            !trimmed.starts_with('#') || trimmed.starts_with("#HttpOnly_")
+        })
         .filter_map(|line| {
             let parts = line.split('\t').collect::<Vec<_>>();
-            (parts.len() >= 7 && parts[0].contains("osu.ppy.sh"))
+            let domain = parts
+                .first()
+                .map(|value| value.trim_start_matches("#HttpOnly_"))?;
+            (parts.len() >= 7 && (domain == "osu.ppy.sh" || domain.ends_with(".osu.ppy.sh")))
                 .then(|| format!("{}={}", parts[5], parts[6]))
         })
         .collect::<Vec<_>>();
     if values.is_empty() {
-        bail!("cookie file contains no osu.ppy.sh session cookies");
+        bail!(
+            "cookie file contains no Netscape-format osu.ppy.sh cookies; export cookies.txt again from the logged-in osu.ppy.sh tab"
+        );
     }
     Ok(values.join("; "))
 }
@@ -236,6 +250,20 @@ mod tests {
         assert_eq!(
             extract_download_url(html).as_deref(),
             Some("https://packs.ppy.sh/S1%20-%20test.zip?sig=one&expires=two")
+        );
+    }
+
+    #[test]
+    fn accepts_httponly_netscape_cookie_lines() {
+        let path = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            path.path(),
+            "# Netscape HTTP Cookie File\n#HttpOnly_.osu.ppy.sh\tTRUE\t/\tTRUE\t0\tosu_session\tsecret\n",
+        )
+        .unwrap();
+        assert_eq!(
+            super::read_netscape_cookie(path.path()).unwrap(),
+            "osu_session=secret"
         );
     }
 }

@@ -27,6 +27,10 @@ enum Command {
         #[arg(long)]
         output: PathBuf,
     },
+    ValidateCookie {
+        #[arg(long)]
+        cookie_file: PathBuf,
+    },
     IngestLocal {
         data_dir: PathBuf,
         archive: PathBuf,
@@ -93,6 +97,10 @@ fn main() -> Result<()> {
             ];
             let ids = importer.sync_catalog(&types)?;
             fs::write(output, ids.join("\n"))?;
+        }
+        Command::ValidateCookie { cookie_file } => {
+            PackImporter::new(Some(&cookie_file))?.validate_cookie_file(&cookie_file)?;
+            println!("Netscape osu.ppy.sh Cookie format is valid.");
         }
         Command::IngestLocal { data_dir, archive } => {
             let mut store = FeatureStore::open(data_dir)?;

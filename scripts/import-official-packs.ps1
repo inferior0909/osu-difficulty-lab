@@ -39,6 +39,8 @@ try {
 
     & $binary init $dataPath
     if ($LASTEXITCODE -ne 0) { throw "init exited with $LASTEXITCODE" }
+    & $binary validate-cookie --cookie-file $cookiePath
+    if ($LASTEXITCODE -ne 0) { throw "validate-cookie exited with $LASTEXITCODE" }
 
     if ($RefreshCatalog -or -not (Test-Path -LiteralPath $catalogPath -PathType Leaf)) {
         & $binary catalog-sync --output $catalogPath
