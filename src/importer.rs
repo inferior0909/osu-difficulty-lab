@@ -2,6 +2,7 @@ use std::{
     fs::{self, File},
     io::{Cursor, Read, Write},
     path::Path,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, bail};
@@ -18,6 +19,16 @@ pub struct PackImportReport {
     pub skipped: usize,
     pub failed: usize,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DownloadProgress {
+    pub attempt: u8,
+    pub downloaded_bytes: u64,
+    pub total_bytes: Option<u64>,
+    pub bytes_per_second: f64,
+}
+
+const MAX_DOWNLOAD_ATTEMPTS: u8 = 3;
 
 pub struct PackImporter {
     client: Client,
@@ -67,6 +78,20 @@ impl PackImporter {
         pack_id: &str,
         cookie_file: &Path,
     ) -> Result<PackImportReport> {
+        self.download_and_import_with_progress(store, analyzer, pack_id, cookie_file, |_| {})
+    }
+
+    pub fn download_and_import_with_progress<F>(
+        &self,
+        store: &mut FeatureStore,
+        analyzer: &Analyzer,
+        pack_id: &str,
+        cookie_file: &Path,
+        mut on_progress: F,
+    ) -> Result<PackImportReport>
+    where
+        F: FnMut(DownloadProgress),
+    {
         if store.pack_is_complete(pack_id)? {
             return Ok(PackImportReport::default());
         }
@@ -80,36 +105,90 @@ impl PackImporter {
             }
         }
         let cookie = read_netscape_cookie(cookie_file)?;
-        let url = self.resolve_pack_download_url(pack_id, &cookie)?;
-        store.mark_pack(pack_id, &url, "downloading", None)?;
-        let response = self
-            .client
-            .get(&url)
-            .header(COOKIE, cookie)
-            .send()?
-            .error_for_status()?;
-        let bytes = response.bytes()?;
-        {
-            let mut file = File::create(&temporary)?;
-            file.write_all(&bytes)?;
-            file.sync_all()?;
-        }
-        match self.import_archive(store, analyzer, &temporary) {
-            Ok(report) => {
+        let pack_page = format!("https://osu.ppy.sh/beatmaps/packs/{pack_id}");
+        let mut final_error = String::new();
+        for attempt in 1..=MAX_DOWNLOAD_ATTEMPTS {
+            let result = (|| -> Result<PackImportReport> {
+                let url = self.resolve_pack_download_url(pack_id, &cookie)?;
+                store.mark_pack(pack_id, &url, "downloading", None)?;
+                self.download_to_file(&url, &cookie, &temporary, attempt, &mut on_progress)?;
+                let report = self.import_archive(store, analyzer, &temporary)?;
                 fs::remove_file(&temporary)?;
                 store.mark_pack(pack_id, &url, "complete", None)?;
                 Ok(report)
-            }
-            Err(error) => {
-                store.mark_pack(
-                    pack_id,
-                    &url,
-                    "failed",
-                    Some("archive processing failed; temporary archive retained for retry"),
-                )?;
-                Err(error)
+            })();
+            match result {
+                Ok(report) => return Ok(report),
+                Err(error) => {
+                    final_error = error.to_string();
+                    let status = if attempt == MAX_DOWNLOAD_ATTEMPTS {
+                        "failed"
+                    } else {
+                        "retrying"
+                    };
+                    store.mark_pack(pack_id, &pack_page, status, Some(&final_error))?;
+                    if attempt < MAX_DOWNLOAD_ATTEMPTS {
+                        std::thread::sleep(Duration::from_secs(2_u64.pow(attempt as u32)));
+                    }
+                }
             }
         }
+        bail!(
+            "official pack {pack_id} failed after {MAX_DOWNLOAD_ATTEMPTS} attempts: {final_error}"
+        )
+    }
+
+    fn download_to_file<F>(
+        &self,
+        url: &str,
+        cookie: &str,
+        destination: &Path,
+        attempt: u8,
+        on_progress: &mut F,
+    ) -> Result<()>
+    where
+        F: FnMut(DownloadProgress),
+    {
+        let mut response = self
+            .client
+            .get(url)
+            .header(COOKIE, cookie)
+            .send()?
+            .error_for_status()?;
+        let total_bytes = response.content_length();
+        let started = Instant::now();
+        let mut last_report = started;
+        let mut downloaded_bytes = 0_u64;
+        let mut buffer = [0_u8; 128 * 1024];
+        let mut file = File::create(destination)?;
+        loop {
+            let count = response.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            file.write_all(&buffer[..count])?;
+            downloaded_bytes += count as u64;
+            let now = Instant::now();
+            if now.duration_since(last_report) >= Duration::from_millis(250) {
+                on_progress(DownloadProgress {
+                    attempt,
+                    downloaded_bytes,
+                    total_bytes,
+                    bytes_per_second: downloaded_bytes as f64
+                        / now.duration_since(started).as_secs_f64().max(f64::EPSILON),
+                });
+                last_report = now;
+            }
+        }
+        file.sync_all()?;
+        let elapsed = started.elapsed();
+        on_progress(DownloadProgress {
+            attempt,
+            downloaded_bytes,
+            total_bytes,
+            bytes_per_second: downloaded_bytes as f64 / elapsed.as_secs_f64().max(f64::EPSILON),
+        });
+        Ok(())
     }
 
     pub fn import_archive(

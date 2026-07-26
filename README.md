@@ -47,7 +47,7 @@ The importer accepts normal `osu.ppy.sh`, `.osu.ppy.sh`, and Netscape `#HttpOnly
 cargo run -- validate-cookie --cookie-file C:\secure\osu-cookies.txt
 ```
 
-The script retrieves the official Pack catalogue, opens each official Pack page with the supplied session to obtain its signed download URL, then processes packs sequentially. It preserves only `data\official-pack-ids.txt`, the analysis/index database, and `data\failed-pack-ids.txt` when needed. Each successfully committed archive is deleted before the next Pack begins; already-complete Pack IDs are skipped on a later run. Use `-RefreshCatalog` to fetch the list again, or `-BatchSize 1` (the default) for the lowest temporary disk use.
+The script retrieves the official Pack catalogue from `osu.ppy.sh`, opens each official Pack page with the supplied session to obtain its signed `packs.ppy.sh` download URL, then processes packs sequentially. It preserves only `data\official-pack-ids.txt`, the analysis/index database, and `data\failed-pack-ids.txt` when needed. Each successfully committed archive is deleted before the next Pack begins; already-complete Pack IDs are skipped on a later run. A failed Pack is retried up to three times with 2 s and 4 s backoff before it is recorded as failed. During each download, the terminal shows the retry attempt, downloaded/total MiB, and current MiB/s. Use `-RefreshCatalog` to fetch the list again, or `-BatchSize 1` (the default) for the lowest temporary disk use.
 
 Training export is available as `export-parquet` (and a lightweight `export-csv`). The normalized binary feature store is the canonical query data; generated data directories, archives, cookie files, and exports are ignored by Git.
 

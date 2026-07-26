@@ -10,7 +10,7 @@ mod storage;
 mod types;
 
 pub use analyzer::{Analyzer, ParsedBeatmap};
-pub use importer::{PackImportReport, PackImporter};
+pub use importer::{DownloadProgress, PackImportReport, PackImporter};
 pub use index::{SimilarityStore, build_main_index};
 pub use normalizer::{Normalizer, fit_normalizer};
 pub use storage::FeatureStore;

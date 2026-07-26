@@ -1,4 +1,10 @@
-use std::{fs, path::PathBuf, sync::Arc};
+use std::{
+    fs,
+    io::{self, Write},
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use anyhow::Result;
 use arrow_array::{ArrayRef, Float32Array, Int64Array, RecordBatch};
@@ -123,8 +129,37 @@ fn main() -> Result<()> {
             let importer = PackImporter::new(Some(&cookie_file))?;
             let analyzer = Analyzer::new(AnalyzerConfig::default());
             for id in pack_ids {
-                let report =
-                    importer.download_and_import(&mut store, &analyzer, &id, &cookie_file)?;
+                let mut last_draw = Instant::now() - Duration::from_secs(1);
+                let result = importer.download_and_import_with_progress(
+                    &mut store,
+                    &analyzer,
+                    &id,
+                    &cookie_file,
+                    |progress| {
+                        let now = Instant::now();
+                        if now.duration_since(last_draw) < Duration::from_millis(250)
+                            && progress
+                                .total_bytes
+                                .is_none_or(|total| progress.downloaded_bytes < total)
+                        {
+                            return;
+                        }
+                        let total = progress
+                            .total_bytes
+                            .map(|value| format!("{:.1} MiB", value as f64 / 1024.0 / 1024.0))
+                            .unwrap_or_else(|| "? MiB".into());
+                        eprint!(
+                            "\r{id} attempt {}/3: {:.1} / {total} · {:.2} MiB/s",
+                            progress.attempt,
+                            progress.downloaded_bytes as f64 / 1024.0 / 1024.0,
+                            progress.bytes_per_second / 1024.0 / 1024.0,
+                        );
+                        let _ = io::stderr().flush();
+                        last_draw = now;
+                    },
+                );
+                eprintln!();
+                let report = result?;
                 println!(
                     "{id}: processed={} inserted={} skipped={} failed={}",
                     report.processed, report.inserted, report.skipped, report.failed
