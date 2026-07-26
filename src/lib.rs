@@ -16,5 +16,10 @@ pub use normalizer::{Normalizer, fit_normalizer};
 pub use storage::FeatureStore;
 pub use types::*;
 
-pub const ANALYZER_VERSION: u32 = 1;
+/// Bump whenever a raw formula, dependency snapshot, or default weight changes.
+pub const ANALYZER_VERSION: u32 = 2;
+pub const ANALYZER_ALGORITHM_ID: &str = "five-dimension-baseline-v2";
+pub const ROSU_PP_VERSION: &str = "4.0.1";
+pub const READING_ALGORITHM_VERSION: &str = "reading-density-ar-section-v1";
+pub const OVERLAP_ALGORITHM_VERSION: &str = "overlap-visibility-spatial-strain-v1";
 pub const RAW_FEATURE_FILE: &str = "raw-features.bin";

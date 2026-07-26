@@ -7,7 +7,11 @@ use std::{
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension, params};
 
-use crate::{BeatmapFeatureRecord, BeatmapMetadata, RAW_FEATURE_FILE, RawFeatureRecord};
+use crate::{
+    ANALYZER_ALGORITHM_ID, ANALYZER_VERSION, BeatmapFeatureRecord, BeatmapMetadata,
+    OVERLAP_ALGORITHM_VERSION, RAW_FEATURE_FILE, READING_ALGORITHM_VERSION, ROSU_PP_VERSION,
+    RawFeatureRecord,
+};
 
 const HEADER_LEN: u64 = 32;
 const FORMAT_VERSION: u32 = 1;
@@ -37,7 +41,15 @@ impl FeatureStore {
             );
             CREATE TABLE IF NOT EXISTS packs (
               pack_id TEXT PRIMARY KEY, source_url TEXT NOT NULL, status TEXT NOT NULL, last_error TEXT, updated_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS analysis_versions (
+              analyzer_version INTEGER PRIMARY KEY, algorithm_id TEXT NOT NULL, rosu_pp_version TEXT NOT NULL,
+              reading_version TEXT NOT NULL, overlap_version TEXT NOT NULL, created_at INTEGER NOT NULL
             );")?;
+        connection.execute(
+            "INSERT OR IGNORE INTO analysis_versions(analyzer_version,algorithm_id,rosu_pp_version,reading_version,overlap_version,created_at) VALUES(?1,?2,?3,?4,?5,unixepoch())",
+            params![ANALYZER_VERSION as i64, ANALYZER_ALGORITHM_ID, ROSU_PP_VERSION, READING_ALGORITHM_VERSION, OVERLAP_ALGORITHM_VERSION],
+        )?;
         let store = Self { root, connection };
         store.ensure_header(RAW_FEATURE_FILE, b"ODLRAW1")?;
         Ok(store)
@@ -56,6 +68,16 @@ impl FeatureStore {
     ) -> Result<()> {
         self.connection.execute("INSERT INTO packs(pack_id,source_url,status,last_error,updated_at) VALUES(?1,?2,?3,?4,unixepoch()) ON CONFLICT(pack_id) DO UPDATE SET status=excluded.status,last_error=excluded.last_error,updated_at=unixepoch()", params![id,source_url,status,error])?;
         Ok(())
+    }
+
+    pub fn pack_is_complete(&self, id: &str) -> Result<bool> {
+        let status: Option<String> = self
+            .connection
+            .query_row("SELECT status FROM packs WHERE pack_id=?1", [id], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        Ok(status.as_deref() == Some("complete"))
     }
 
     pub fn append_raw(

@@ -61,8 +61,11 @@ impl PackImporter {
         pack_id: &str,
         cookie_file: &Path,
     ) -> Result<PackImportReport> {
+        if store.pack_is_complete(pack_id)? {
+            return Ok(PackImportReport::default());
+        }
         let cookie = read_netscape_cookie(cookie_file)?;
-        let url = format!("https://osu.ppy.sh/beatmaps/packs/{pack_id}/download");
+        let url = self.resolve_pack_download_url(pack_id, &cookie)?;
         store.mark_pack(pack_id, &url, "downloading", None)?;
         let temporary = store.root().join("tmp").join(format!("{pack_id}.part"));
         let response = self
@@ -118,7 +121,26 @@ impl PackImporter {
                 self.import_osz(store, analyzer, &bytes, &mut report)?;
             }
         }
+        if report.processed == 0 {
+            bail!("official pack archive contains no .osu beatmaps");
+        }
         Ok(report)
+    }
+
+    fn resolve_pack_download_url(&self, pack_id: &str, cookie: &str) -> Result<String> {
+        let detail_url = format!("https://osu.ppy.sh/beatmaps/packs/{pack_id}");
+        let page = self
+            .client
+            .get(&detail_url)
+            .header(COOKIE, cookie)
+            .send()?
+            .error_for_status()?
+            .text()?;
+        extract_download_url(&page).with_context(|| {
+            format!(
+                "official pack {pack_id} did not expose an authenticated download link; refresh the osu.ppy.sh Cookie file"
+            )
+        })
     }
     fn import_osz(
         &self,
@@ -176,6 +198,17 @@ fn extract_pack_ids(body: &str) -> Vec<String> {
     }
     ids
 }
+
+fn extract_download_url(body: &str) -> Option<String> {
+    body.split("href=\"")
+        .skip(1)
+        .filter_map(|fragment| fragment.split_once('"').map(|(url, _)| url))
+        .map(|url| url.replace("&amp;", "&"))
+        .find(|url| {
+            url.starts_with("https://packs.ppy.sh/") || url.starts_with("https://dl.osu.ppy.sh/")
+        })
+}
+
 fn read_netscape_cookie(path: &Path) -> Result<String> {
     let content = fs::read_to_string(path).context("read cookie file")?;
     let values = content
@@ -191,4 +224,18 @@ fn read_netscape_cookie(path: &Path) -> Result<String> {
         bail!("cookie file contains no osu.ppy.sh session cookies");
     }
     Ok(values.join("; "))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_download_url;
+
+    #[test]
+    fn extracts_authenticated_pack_download() {
+        let html = r#"<a href="https://packs.ppy.sh/S1%20-%20test.zip?sig=one&amp;expires=two">download</a>"#;
+        assert_eq!(
+            extract_download_url(html).as_deref(),
+            Some("https://packs.ppy.sh/S1%20-%20test.zip?sig=one&expires=two")
+        );
+    }
 }
