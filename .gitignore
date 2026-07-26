@@ -1,0 +1,8 @@
+/target/
+/data/
+/tmp/
+*.part
+*.sqlite
+*.cookie
+cookies.txt
+*.csv
