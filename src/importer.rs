@@ -1,12 +1,16 @@
 use std::{
-    fs::{self, File},
+    fs::{self, File, OpenOptions},
     io::{Cursor, Read, Write},
     path::Path,
     time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, bail};
-use reqwest::{blocking::Client, header::COOKIE};
+use reqwest::{
+    StatusCode,
+    blocking::Client,
+    header::{COOKIE, RANGE},
+};
 use sevenz_rust::{Error as SevenZError, decompress_file_with_extract_fn};
 use zip::ZipArchive;
 
@@ -29,6 +33,8 @@ pub struct DownloadProgress {
 }
 
 const MAX_DOWNLOAD_ATTEMPTS: u8 = 3;
+const MIN_DOWNLOAD_BYTES_PER_SECOND: f64 = 1024.0 * 1024.0;
+const SLOW_DOWNLOAD_WINDOW: Duration = Duration::from_secs(60);
 
 pub struct PackImporter {
     client: Client,
@@ -149,18 +155,31 @@ impl PackImporter {
     where
         F: FnMut(DownloadProgress),
     {
-        let mut response = self
-            .client
-            .get(url)
-            .header(COOKIE, cookie)
-            .send()?
-            .error_for_status()?;
-        let total_bytes = response.content_length();
+        let existing_bytes = destination
+            .metadata()
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        let mut request = self.client.get(url).header(COOKIE, cookie);
+        if existing_bytes > 0 {
+            request = request.header(RANGE, format!("bytes={existing_bytes}-"));
+        }
+        let mut response = request.send()?.error_for_status()?;
+        let is_resumed = existing_bytes > 0 && response.status() == StatusCode::PARTIAL_CONTENT;
+        let initial_bytes = if is_resumed { existing_bytes } else { 0 };
+        let total_bytes = response
+            .content_length()
+            .map(|length| length + initial_bytes);
         let started = Instant::now();
         let mut last_report = started;
-        let mut downloaded_bytes = 0_u64;
+        let mut rate_window_started = started;
+        let mut rate_window_bytes = 0_u64;
+        let mut downloaded_bytes = initial_bytes;
         let mut buffer = [0_u8; 128 * 1024];
-        let mut file = File::create(destination)?;
+        let mut file = if is_resumed {
+            OpenOptions::new().append(true).open(destination)?
+        } else {
+            File::create(destination)?
+        };
         loop {
             let count = response.read(&mut buffer)?;
             if count == 0 {
@@ -168,13 +187,26 @@ impl PackImporter {
             }
             file.write_all(&buffer[..count])?;
             downloaded_bytes += count as u64;
+            rate_window_bytes += count as u64;
             let now = Instant::now();
+            let rate_window_elapsed = now.duration_since(rate_window_started);
+            if rate_window_elapsed >= SLOW_DOWNLOAD_WINDOW {
+                let rate = rate_window_bytes as f64 / rate_window_elapsed.as_secs_f64();
+                if is_below_minimum_download_rate(rate_window_elapsed, rate_window_bytes) {
+                    bail!(
+                        "download rate {:.2} MiB/s stayed below 1.00 MiB/s for 60 seconds; reconnecting",
+                        rate / 1024.0 / 1024.0
+                    );
+                }
+                rate_window_started = now;
+                rate_window_bytes = 0;
+            }
             if now.duration_since(last_report) >= Duration::from_millis(250) {
                 on_progress(DownloadProgress {
                     attempt,
                     downloaded_bytes,
                     total_bytes,
-                    bytes_per_second: downloaded_bytes as f64
+                    bytes_per_second: (downloaded_bytes - initial_bytes) as f64
                         / now.duration_since(started).as_secs_f64().max(f64::EPSILON),
                 });
                 last_report = now;
@@ -186,7 +218,8 @@ impl PackImporter {
             attempt,
             downloaded_bytes,
             total_bytes,
-            bytes_per_second: downloaded_bytes as f64 / elapsed.as_secs_f64().max(f64::EPSILON),
+            bytes_per_second: (downloaded_bytes - initial_bytes) as f64
+                / elapsed.as_secs_f64().max(f64::EPSILON),
         });
         Ok(())
     }
@@ -370,9 +403,15 @@ fn read_netscape_cookie(path: &Path) -> Result<String> {
     Ok(values.join("; "))
 }
 
+fn is_below_minimum_download_rate(window: Duration, transferred_bytes: u64) -> bool {
+    transferred_bytes as f64 / window.as_secs_f64().max(f64::EPSILON)
+        < MIN_DOWNLOAD_BYTES_PER_SECOND
+}
+
 #[cfg(test)]
 mod tests {
     use super::extract_download_url;
+    use std::time::Duration;
 
     #[test]
     fn extracts_authenticated_pack_download() {
@@ -409,5 +448,17 @@ mod tests {
             super::read_netscape_cookie(path.path()).unwrap(),
             "osu_session=secret"
         );
+    }
+
+    #[test]
+    fn slow_download_threshold_triggers_reconnect() {
+        assert!(super::is_below_minimum_download_rate(
+            Duration::from_secs(60),
+            59 * 1024 * 1024
+        ));
+        assert!(!super::is_below_minimum_download_rate(
+            Duration::from_secs(60),
+            60 * 1024 * 1024
+        ));
     }
 }
