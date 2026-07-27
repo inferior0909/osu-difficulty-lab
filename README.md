@@ -2,6 +2,13 @@
 
 An independent Rust research library and CLI for creating a reproducible five-dimensional `osu!standard` difficulty dataset and local similarity index. It does not depend on OPP.
 
+
+!! Many maps surface failures occurred during the analysis process !!
+
+!! Not considering whether the format has also been updated over the years of updates? !!
+
+
+
 ## Current scope
 
 - NoMod `osu!standard` only.

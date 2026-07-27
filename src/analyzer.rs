@@ -43,6 +43,8 @@ pub struct Analyzer {
     config: AnalyzerConfig,
 }
 
+//There are many maps failed, maybe there need some optimization.
+//Like maybe more structures support?
 impl Analyzer {
     pub fn new(config: AnalyzerConfig) -> Self {
         Self { config }
