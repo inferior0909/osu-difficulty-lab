@@ -104,10 +104,39 @@ impl PackImporter {
         let temporary = store.root().join("tmp").join(format!("{pack_id}.part"));
         if temporary.is_file() {
             store.mark_pack(pack_id, &temporary.to_string_lossy(), "processing", None)?;
-            if let Ok(report) = self.import_archive(store, analyzer, &temporary) {
-                fs::remove_file(&temporary)?;
-                store.mark_pack(pack_id, "local-retry", "complete", None)?;
-                return Ok(report);
+            match self.import_archive(store, analyzer, &temporary) {
+                Ok(report) if report.failed == 0 => {
+                    fs::remove_file(&temporary)?;
+                    store.mark_pack(pack_id, "local-retry", "complete", None)?;
+                    return Ok(report);
+                }
+                Ok(report) => {
+                    let error = format!(
+                        "{} of {} osu!standard beatmaps failed analysis; retained archive for retry",
+                        report.failed, report.processed
+                    );
+                    store.mark_pack(
+                        pack_id,
+                        &temporary.to_string_lossy(),
+                        "failed",
+                        Some(&error),
+                    )?;
+                    bail!("official pack {pack_id}: {error}");
+                }
+                Err(error) if is_rar_archive(&temporary)? => {
+                    let error = format!("RAR archive support is unavailable: {error}");
+                    store.mark_pack(
+                        pack_id,
+                        &temporary.to_string_lossy(),
+                        "failed",
+                        Some(&error),
+                    )?;
+                    bail!("official pack {pack_id}: {error}");
+                }
+                Err(_) => {
+                    // The archive may be an incomplete download. Re-download below;
+                    // `download_to_file` resumes where possible.
+                }
             }
         }
         let cookie = read_netscape_cookie(cookie_file)?;
@@ -119,6 +148,13 @@ impl PackImporter {
                 store.mark_pack(pack_id, &url, "downloading", None)?;
                 self.download_to_file(&url, &cookie, &temporary, attempt, &mut on_progress)?;
                 let report = self.import_archive(store, analyzer, &temporary)?;
+                if report.failed > 0 {
+                    bail!(
+                        "{} of {} osu!standard beatmaps failed analysis; retained archive for retry",
+                        report.failed,
+                        report.processed
+                    );
+                }
                 fs::remove_file(&temporary)?;
                 store.mark_pack(pack_id, &url, "complete", None)?;
                 Ok(report)
@@ -163,8 +199,19 @@ impl PackImporter {
         if existing_bytes > 0 {
             request = request.header(RANGE, format!("bytes={existing_bytes}-"));
         }
-        let mut response = request.send()?.error_for_status()?;
-        let is_resumed = existing_bytes > 0 && response.status() == StatusCode::PARTIAL_CONTENT;
+        let mut response = request.send()?;
+        let is_resumed = if existing_bytes > 0 && response.status() == StatusCode::PARTIAL_CONTENT {
+            true
+        } else if existing_bytes > 0 && response.status() == StatusCode::RANGE_NOT_SATISFIABLE {
+            // The retained archive is already complete (or the server no longer
+            // accepts its range). Start a clean request instead of retrying 416.
+            File::create(destination)?;
+            response = self.client.get(url).header(COOKIE, cookie).send()?;
+            false
+        } else {
+            false
+        };
+        let mut response = response.error_for_status()?;
         let initial_bytes = if is_resumed { existing_bytes } else { 0 };
         let total_bytes = response
             .content_length()
@@ -234,6 +281,9 @@ impl PackImporter {
         File::open(archive_path)?.read_exact(&mut signature)?;
         if signature == *b"7z\xBC\xAF\x27\x1C" {
             return self.import_7z(store, analyzer, archive_path);
+        }
+        if signature == *b"Rar!\x1A\x07" {
+            bail!("RAR archive support is unavailable");
         }
 
         let file = File::open(archive_path)
@@ -336,6 +386,13 @@ impl PackImporter {
         report: &mut PackImportReport,
     ) {
         report.processed += 1;
+        // Official catalogues contain packs for all four osu! modes. This data set is
+        // deliberately osu!standard-only, so a non-standard `.osu` is an expected
+        // exclusion rather than a failed import.
+        if !is_standard_beatmap(bytes) {
+            report.skipped += 1;
+            return;
+        }
         match analyzer
             .analyze_bytes(bytes)
             .and_then(|(metadata, record)| {
@@ -348,6 +405,30 @@ impl PackImporter {
             Err(_) => report.failed += 1,
         }
     }
+}
+
+fn is_standard_beatmap(bytes: &[u8]) -> bool {
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        // Let the analyzer report malformed or legacy-encoded standard maps as real
+        // failures. We only skip a map when its mode can be established safely.
+        return true;
+    };
+    for line in text.lines() {
+        let line = line.trim().trim_start_matches('\u{feff}');
+        if let Some((key, value)) = line.split_once(':')
+            && key.trim().eq_ignore_ascii_case("Mode")
+        {
+            return value.trim().parse::<u8>().map_or(true, |mode| mode == 0);
+        }
+    }
+    // `Mode` is optional in old osu! files and defaults to osu!standard.
+    true
+}
+
+fn is_rar_archive(path: &Path) -> Result<bool> {
+    let mut signature = [0_u8; 6];
+    File::open(path)?.read_exact(&mut signature)?;
+    Ok(signature == *b"Rar!\x1A\x07")
 }
 
 fn extract_pack_ids(body: &str) -> Vec<String> {
@@ -410,7 +491,7 @@ fn is_below_minimum_download_rate(window: Duration, transferred_bytes: u64) -> b
 
 #[cfg(test)]
 mod tests {
-    use super::extract_download_url;
+    use super::{extract_download_url, is_standard_beatmap};
     use std::time::Duration;
 
     #[test]
@@ -460,5 +541,13 @@ mod tests {
             Duration::from_secs(60),
             60 * 1024 * 1024
         ));
+    }
+
+    #[test]
+    fn identifies_only_standard_beatmaps_as_supported() {
+        assert!(is_standard_beatmap(b"[General]\nMode: 0\n"));
+        assert!(!is_standard_beatmap(b"[General]\nMode: 3\n"));
+        assert!(!is_standard_beatmap(b"[General]\nMode: 1\n"));
+        assert!(is_standard_beatmap(b"[General]\n"));
     }
 }

@@ -1,34 +1,21 @@
 # osu-difficulty-lab
 
-An independent Rust research library and CLI for creating a reproducible five-dimensional `osu!standard` difficulty dataset and local similarity index. It does not depend on OPP.
+`osu-difficulty-lab` 是一个用于分析 `osu!standard` 谱面的 Rust 工具。
 
+它会把谱面转换成五个难度特征：瞄准、速度、读图、手电和物件重叠，并在本地建立相似谱面索引。你可以用它查找「玩法和手感接近」的谱面，也可以导出数据做研究。
 
-!! Many maps surface failures occurred during the analysis process !!
+当前版本：`v0.1.0`
 
-!! Not considering whether the format has also been updated over the years of updates? !!
+## 支持范围
 
+- 只支持 `osu!standard` 和 NoMod。
+- 支持导入本地谱包，以及从官方谱包目录下载谱面。
+- 源谱面只在导入时临时保存；分析结果、元数据和索引保存在本地 `data/` 目录。
+- 数据和索引不提交到 Git；需要分发时请使用 Release 附件。
 
+## 快速开始
 
-## Current scope
-
-- NoMod `osu!standard` only.
-- Aim, Speed, and Flashlight use pinned `rosu-pp` difficulty attributes.
-- Reading is a versioned 400 ms density × AR-pressure baseline.
-- Overlap measures visible spatial interference, stacks, slider-path proximity, order ambiguity, and movement crossings.
-- Raw records, normalized records, SQLite metadata, a persisted HNSW main index, and a delta-index placeholder remain local. Source beatmap archives are transient.
-- Official Packs may be ZIP or 7z containers; both are processed without extracting unrelated media to disk. Very early maps with no official `BeatmapID` receive a deterministic SHA-256-derived local ID.
-
-## Analysis version
-
-Every `metadata.sqlite` database registers the algorithm snapshot used by its records. The current snapshot is `analyzer_version = 2` / `five-dimension-baseline-v2`:
-
-- `rosu-pp 4.0.1`: NoMod Aim, Speed, and Flashlight attributes.
-- `reading-density-ar-section-v1`: 400 ms non-spinner density sections, effective AR pressure, descending peak aggregation with a `0.90` decay.
-- `overlap-visibility-spatial-strain-v1`: AR visibility window, 3 s candidate window, spatial/near overlap, stack pressure, slider-path proximity, movement crossing, and 400 ms strain peaks.
-
-Changing any formula, dependency snapshot, or default weight requires a new `ANALYZER_VERSION`; records are then appended rather than overwritten.
-
-## Workflow
+需要安装 Rust 工具链。
 
 ```powershell
 cargo run -- init .\data
@@ -38,27 +25,18 @@ cargo run -- index-build .\data --version 1
 cargo run -- query .\data 12345 --version 1
 ```
 
-`catalog-sync` writes the official pack IDs from all catalogue categories. `ingest-packs` requires a user-exported Netscape cookie file for `osu.ppy.sh`; the cookie is read only for the request and is never persisted by the application. Failed imports retain their single temporary archive for retry; successful imports delete it only after records are committed.
-
-## Official Pack batch script
-
-Export your logged-in `osu.ppy.sh` cookies in Netscape format, keep that file outside the repository, then run:
+导入官方谱包需要从已登录的 `osu.ppy.sh` 浏览器标签页导出 Netscape 格式 Cookie。Cookie 文件请保存在仓库外：
 
 ```powershell
 .\scripts\import-official-packs.ps1 -CookieFile C:\secure\osu-cookies.txt -Release
 ```
 
-The importer accepts normal `osu.ppy.sh`, `.osu.ppy.sh`, and Netscape `#HttpOnly_.osu.ppy.sh` Cookie rows. Validate an export before starting a long batch:
+## 文档
 
-```powershell
-cargo run -- validate-cookie --cookie-file C:\secure\osu-cookies.txt
-```
+- [实现说明](docs/implementation.md)：数据流程、特征算法、存储格式、索引、导入与恢复机制。
+- [命令说明](docs/implementation.md#命令行)：所有 CLI 命令及其用途。
 
-The script retrieves the official Pack catalogue from `osu.ppy.sh`, opens each official Pack page with the supplied session to obtain its signed `packs.ppy.sh` download URL, then processes packs sequentially. It preserves only `data\official-pack-ids.txt`, the analysis/index database, and `data\failed-pack-ids.txt` when needed. Each successfully committed archive is deleted before the next Pack begins; already-complete Pack IDs are skipped on a later run. A failed Pack is retried up to three times with 2 s and 4 s backoff before it is recorded as failed. During each download, the terminal shows the retry attempt, downloaded/total MiB, and current MiB/s. Use `-RefreshCatalog` to fetch the list again, or `-BatchSize 1` (the default) for the lowest temporary disk use.
-
-Training export is available as `export-parquet` (and a lightweight `export-csv`). The normalized binary feature store is the canonical query data; generated data directories, archives, cookie files, and exports are ignored by Git.
-
-## Validation
+## 验证
 
 ```powershell
 cargo fmt --check
@@ -66,4 +44,4 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-This project is not affiliated with ppy Pty Ltd. `osu!` is a trademark of ppy Pty Ltd.
+本项目与 ppy Pty Ltd. 无关。`osu!` 是 ppy Pty Ltd. 的商标。
