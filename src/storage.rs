@@ -26,6 +26,7 @@ impl FeatureStore {
         let root = root.as_ref().to_path_buf();
         fs::create_dir_all(root.join("normalizers"))?;
         fs::create_dir_all(root.join("indexes"))?;
+        fs::create_dir_all(root.join("beatmaps"))?;
         fs::create_dir_all(root.join("tmp"))?;
         let connection = Connection::open(root.join("metadata.sqlite"))?;
         connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;
@@ -59,6 +60,17 @@ impl FeatureStore {
         &self.root
     }
 
+    /// Retain the original chart text.  Sources are intentionally flat and named by
+    /// beatmap ID, which makes them stable across pack re-downloads and keeps this
+    /// directory free of backgrounds, audio, videos, and other non-`.osu` assets.
+    pub fn persist_beatmap_source(&self, beatmap_id: u64, bytes: &[u8]) -> Result<()> {
+        fs::write(
+            self.root.join("beatmaps").join(format!("{beatmap_id}.osu")),
+            bytes,
+        )?;
+        Ok(())
+    }
+
     pub fn mark_pack(
         &self,
         id: &str,
@@ -80,6 +92,16 @@ impl FeatureStore {
         Ok(status.as_deref() == Some("complete"))
     }
 
+    pub fn pack_is_excluded(&self, id: &str) -> Result<bool> {
+        let status: Option<String> = self
+            .connection
+            .query_row("SELECT status FROM packs WHERE pack_id=?1", [id], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        Ok(status.as_deref() == Some("excluded"))
+    }
+
     pub fn append_raw(
         &mut self,
         metadata: &BeatmapMetadata,
@@ -91,8 +113,11 @@ impl FeatureStore {
         let existing: Option<String> = self
             .connection
             .query_row(
-                "SELECT checksum FROM beatmaps WHERE beatmap_id=?1",
-                [record.beatmap_id as i64],
+                "SELECT beatmaps.checksum FROM beatmaps INNER JOIN analyses \
+                 ON analyses.beatmap_id=beatmaps.beatmap_id \
+                 WHERE beatmaps.beatmap_id=?1 AND analyses.mod_profile=0 \
+                   AND analyses.analyzer_version=?2",
+                params![record.beatmap_id as i64, record.analyzer_version as i64],
                 |row| row.get(0),
             )
             .optional()?;
@@ -109,10 +134,10 @@ impl FeatureStore {
 
     pub fn raw_records(&self) -> Result<Vec<RawFeatureRecord>> {
         let mut statement = self.connection.prepare(
-            "SELECT record_offset FROM analyses WHERE status IN (1,2) ORDER BY beatmap_id",
+            "SELECT record_offset FROM analyses WHERE analyzer_version=?1 AND status IN (1,2) ORDER BY beatmap_id",
         )?;
         let offsets = statement
-            .query_map([], |row| row.get::<_, i64>(0))?
+            .query_map([ANALYZER_VERSION as i64], |row| row.get::<_, i64>(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         offsets
             .into_iter()
@@ -157,9 +182,11 @@ impl FeatureStore {
 
     pub fn normalized_records(&self, version: u32) -> Result<Vec<BeatmapFeatureRecord>> {
         let file = format!("features-v{version}.bin");
-        let mut statement = self.connection.prepare("SELECT normalized_offset FROM analyses WHERE normalization_version=?1 AND status=2 ORDER BY beatmap_id")?;
+        let mut statement = self.connection.prepare("SELECT normalized_offset FROM analyses WHERE analyzer_version=?1 AND normalization_version=?2 AND status=2 ORDER BY beatmap_id")?;
         let offsets = statement
-            .query_map([version as i64], |row| row.get::<_, Option<i64>>(0))?
+            .query_map(params![ANALYZER_VERSION as i64, version as i64], |row| {
+                row.get::<_, Option<i64>>(0)
+            })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         offsets
             .into_iter()

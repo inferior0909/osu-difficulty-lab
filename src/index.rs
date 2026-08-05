@@ -172,7 +172,7 @@ fn difficulty_distance(
     let x = a.as_array();
     let y = b.as_array();
     let z = w;
-    let weights = [z.aim, z.speed, z.reading, z.flashlight, z.overlap];
+    let weights = [z.aim, z.speed, z.reading, z.slider, z.overlap];
     x.iter()
         .zip(y)
         .zip(weights)

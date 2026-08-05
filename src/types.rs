@@ -6,7 +6,7 @@ pub struct DifficultyVector {
     pub aim: f32,
     pub speed: f32,
     pub reading: f32,
-    pub flashlight: f32,
+    pub slider: f32,
     pub overlap: f32,
 }
 
@@ -16,7 +16,7 @@ impl DifficultyVector {
             self.aim,
             self.speed,
             self.reading,
-            self.flashlight,
+            self.slider,
             self.overlap,
         ]
     }
@@ -25,7 +25,7 @@ impl DifficultyVector {
             aim: value[0],
             speed: value[1],
             reading: value[2],
-            flashlight: value[3],
+            slider: value[3],
             overlap: value[4],
         }
     }
@@ -141,7 +141,7 @@ pub struct DifficultyWeights {
     pub aim: f32,
     pub speed: f32,
     pub reading: f32,
-    pub flashlight: f32,
+    pub slider: f32,
     pub overlap: f32,
 }
 impl Default for DifficultyWeights {
@@ -150,7 +150,7 @@ impl Default for DifficultyWeights {
             aim: 1.0,
             speed: 1.0,
             reading: 1.0,
-            flashlight: 1.0,
+            slider: 1.0,
             overlap: 1.0,
         }
     }

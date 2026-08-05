@@ -1367,6 +1367,7 @@ dependencies = [
  "rosu-pp",
  "rusqlite",
  "serde",
+ "serde_json",
  "sevenz-rust",
  "sha2",
  "space",

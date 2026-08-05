@@ -10,6 +10,10 @@ use crate::{
     OverlapStatistics, RawFeatureRecord,
 };
 
+const SLIDER_COMPOSITION_WEIGHT: f32 = 0.30;
+const SLIDER_SPEED_CHANGE_WEIGHT: f32 = 0.70;
+const SLIDER_SPEED_CHANGE_EPSILON: f64 = 1e-6;
+
 #[derive(Debug, Clone)]
 pub struct ParsedBeatmap {
     pub metadata: BeatmapMetadata,
@@ -29,6 +33,7 @@ struct HitObject {
     end_time: f64,
     kind: ObjectKind,
     path: Vec<(f64, f64)>,
+    slider_speed: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,13 +43,18 @@ enum ObjectKind {
     Spinner,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct TimingPoint {
+    time: f64,
+    beat_length: f64,
+    uninherited: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct Analyzer {
     config: AnalyzerConfig,
 }
 
-//There are many maps failed, maybe there need some optimization.
-//Like maybe more structures support?
 impl Analyzer {
     pub fn new(config: AnalyzerConfig) -> Self {
         Self { config }
@@ -113,7 +123,7 @@ impl Analyzer {
             aim: attrs.aim as f32,
             speed: attrs.speed as f32,
             reading: reading_baseline(&parsed.objects, parsed.ar, &self.config) as f32,
-            flashlight: attrs.flashlight as f32,
+            slider: slider_dimension(&parsed.objects, circles, sliders),
             overlap: overlap.peak,
         };
         let record = RawFeatureRecord {
@@ -163,7 +173,7 @@ impl Analyzer {
                 compared += 1;
                 let dt = (object.time - other.time).abs();
                 let time_weight = (-dt / cfg.temporal_tau_ms).exp();
-                let visibility = (visible_overlap / preempt.min(preempt).max(1.0)) * time_weight;
+                let visibility = (visible_overlap / preempt.max(1.0)) * time_weight;
                 let distance = min_object_distance(object, other);
                 let q = distance / (2.0 * radius).max(1.0);
                 if q > cfg.maximum_distance_ratio {
@@ -272,6 +282,75 @@ fn ratio(numerator: f32, denominator: f32) -> f32 {
         numerator / denominator
     } else {
         0.0
+    }
+}
+
+fn slider_dimension(objects: &[HitObject], circles: f32, sliders: f32) -> f32 {
+    let slider_composition = ratio(sliders, circles + sliders);
+    let speed_change_frequency = slider_speed_change_frequency(objects) as f32;
+    SLIDER_COMPOSITION_WEIGHT * slider_composition
+        + SLIDER_SPEED_CHANGE_WEIGHT * speed_change_frequency
+}
+
+fn slider_speed_change_frequency(objects: &[HitObject]) -> f64 {
+    let mut previous: Option<f64> = None;
+    let mut transitions = 0_u32;
+    let mut changes = 0_u32;
+
+    for speed in objects
+        .iter()
+        .filter(|object| object.kind == ObjectKind::Slider)
+        .map(|object| object.slider_speed)
+    {
+        if let Some(previous_speed) = previous {
+            transitions += 1;
+            let scale = f64::max(previous_speed.abs(), speed.abs()).max(1.0);
+            if f64::abs(speed - previous_speed) > scale * SLIDER_SPEED_CHANGE_EPSILON {
+                changes += 1;
+            }
+        }
+        previous = Some(speed);
+    }
+
+    if transitions == 0 {
+        0.0
+    } else {
+        changes as f64 / transitions as f64
+    }
+}
+
+fn apply_slider_speeds(
+    objects: &mut [HitObject],
+    timing_points: &mut [TimingPoint],
+    slider_multiplier: f64,
+) {
+    timing_points.sort_by(|left, right| {
+        left.time
+            .partial_cmp(&right.time)
+            .unwrap_or(Ordering::Equal)
+    });
+    let mut timing_index = 0;
+    let mut beat_length = 1000.0_f64;
+    let mut velocity_multiplier = 1.0_f64;
+
+    for object in objects {
+        while timing_index < timing_points.len() && timing_points[timing_index].time <= object.time
+        {
+            let point = timing_points[timing_index];
+            if point.uninherited {
+                if point.beat_length > 0.0 {
+                    beat_length = point.beat_length;
+                }
+            } else if point.beat_length < 0.0 {
+                velocity_multiplier = (-100.0 / point.beat_length).clamp(0.1, 10.0);
+            }
+            timing_index += 1;
+        }
+
+        if object.kind == ObjectKind::Slider {
+            object.slider_speed = slider_multiplier.max(0.0) * 100.0 * velocity_multiplier * 1000.0
+                / beat_length.max(1.0);
+        }
     }
 }
 fn interval_overlap(a_start: f64, a_end: f64, b_start: f64, b_end: f64) -> f64 {
@@ -404,6 +483,8 @@ fn parse_beatmap(bytes: &[u8]) -> Result<ParsedBeatmap> {
     let mut cs = 5.0;
     let mut hp = 5.0;
     let mut bpm = 0.0;
+    let mut slider_multiplier = 1.4;
+    let mut timing_points = Vec::new();
     let mut objects = Vec::new();
     for line in text
         .lines()
@@ -443,19 +524,28 @@ fn parse_beatmap(bytes: &[u8]) -> Result<ParsedBeatmap> {
                         "OverallDifficulty" => od = value,
                         "CircleSize" => cs = value,
                         "HPDrainRate" => hp = value,
+                        "SliderMultiplier" => slider_multiplier = value,
                         _ => {}
                     }
                 }
             }
             "TimingPoints" => {
-                if bpm == 0.0 {
-                    let values: Vec<_> = line.split(',').collect();
-                    if values.len() > 1 {
-                        let beat = values[1].parse::<f64>().unwrap_or(0.0);
-                        if beat > 0.0 {
-                            bpm = 60000.0 / beat;
-                        }
+                let values: Vec<_> = line.split(',').collect();
+                if values.len() > 1 {
+                    let time = values[0].parse::<f64>().unwrap_or(0.0);
+                    let beat_length = values[1].parse::<f64>().unwrap_or(0.0);
+                    let uninherited = values
+                        .get(6)
+                        .map(|value| value.trim() == "1")
+                        .unwrap_or(beat_length > 0.0);
+                    if bpm == 0.0 && uninherited && beat_length > 0.0 {
+                        bpm = 60_000.0 / beat_length;
                     }
+                    timing_points.push(TimingPoint {
+                        time,
+                        beat_length,
+                        uninherited,
+                    });
                 }
             }
             "HitObjects" => {
@@ -495,6 +585,7 @@ fn parse_beatmap(bytes: &[u8]) -> Result<ParsedBeatmap> {
                         end_time,
                         kind,
                         path,
+                        slider_speed: 0.0,
                     });
                 }
             }
@@ -509,6 +600,7 @@ fn parse_beatmap(bytes: &[u8]) -> Result<ParsedBeatmap> {
             .partial_cmp(&right.time)
             .unwrap_or(Ordering::Equal)
     });
+    apply_slider_speeds(&mut objects, &mut timing_points, slider_multiplier);
     let digest = sha2::Sha256::digest(bytes);
     // Very early official packs predate BeatmapID/BeatmapSetID metadata. Keep them
     // queryable with a deterministic local ID while retaining the full checksum.
@@ -536,4 +628,65 @@ fn parse_beatmap(bytes: &[u8]) -> Result<ParsedBeatmap> {
         bpm,
         objects,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn object(time: f64, kind: ObjectKind) -> HitObject {
+        HitObject {
+            x: 0.0,
+            y: 0.0,
+            time,
+            end_time: time,
+            kind,
+            path: Vec::new(),
+            slider_speed: 0.0,
+        }
+    }
+
+    #[test]
+    fn slider_speed_uses_bpm_and_inherited_velocity() {
+        let mut objects = vec![
+            object(500.0, ObjectKind::Slider),
+            object(1500.0, ObjectKind::Slider),
+            object(2500.0, ObjectKind::Slider),
+        ];
+        let mut timing_points = vec![
+            TimingPoint {
+                time: 0.0,
+                beat_length: 500.0,
+                uninherited: true,
+            },
+            TimingPoint {
+                time: 1000.0,
+                beat_length: -50.0,
+                uninherited: false,
+            },
+        ];
+
+        apply_slider_speeds(&mut objects, &mut timing_points, 1.4);
+
+        assert!((objects[0].slider_speed - 280.0).abs() < 1e-6);
+        assert!((objects[1].slider_speed - 560.0).abs() < 1e-6);
+        assert!((objects[2].slider_speed - 560.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn slider_dimension_combines_composition_and_change_frequency() {
+        let mut objects = vec![
+            object(0.0, ObjectKind::Circle),
+            object(100.0, ObjectKind::Slider),
+            object(200.0, ObjectKind::Slider),
+            object(300.0, ObjectKind::Slider),
+        ];
+        objects[1].slider_speed = 280.0;
+        objects[2].slider_speed = 560.0;
+        objects[3].slider_speed = 560.0;
+
+        let value = slider_dimension(&objects, 1.0, 3.0);
+
+        assert!((value - 0.575).abs() < 1e-6);
+    }
 }

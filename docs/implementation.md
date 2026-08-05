@@ -10,9 +10,9 @@
 
 - 仅处理模式值为 `0` 的 `osu!standard` 谱面。
 - 仅支持 NoMod，所有记录的 `mod_profile` 都是 `0`。
-- Aim、Speed 与 Flashlight 来自固定版本的 `rosu-pp`。
-- Reading 和 Overlap 是本项目定义的基线算法，不等同于官方星数或任何现有性能计算。
-- 谱面压缩包用于导入，成功后会删除；本地留下的是特征、元数据和索引。
+- Aim 与 Speed 来自固定版本的 `rosu-pp`。
+- Reading、Slider 和 Overlap 是本项目定义的基线算法，不等同于官方星数或任何现有性能计算。
+- 谱面压缩包只用于导入，成功后会删除；每个有效的标准谱面会保留为 `beatmaps/<BeatmapID>.osu`，本地同时留下特征、元数据和索引。
 
 ## 整体流程
 
@@ -40,8 +40,8 @@ HNSW 构建 ──────► indexes/difficulty-main.hnsw
 
 | 项目 | 当前值 |
 | --- | --- |
-| 分析版本 | `2` |
-| 算法 ID | `five-dimension-baseline-v2` |
+| 分析版本 | `3` |
+| 算法 ID | `five-dimension-slider-v3` |
 | `rosu-pp` | `4.0.1` |
 | Reading | `reading-density-ar-section-v1` |
 | Overlap | `overlap-visibility-spatial-strain-v1` |
@@ -71,11 +71,11 @@ HNSW 构建 ──────► indexes/difficulty-main.hnsw
 
 ## 五维难度特征
 
-原始难度向量的顺序固定为：`[aim, speed, reading, flashlight, overlap]`。
+原始难度向量的顺序固定为：`[aim, speed, reading, slider, overlap]`。
 
-### Aim、Speed、Flashlight
+### Aim、Speed
 
-三项分别直接取 `rosu-pp 4.0.1` 在 NoMod 下的 `aim`、`speed` 和 `flashlight` 属性。项目不会自行修改这三项的公式。
+两项分别直接取 `rosu-pp 4.0.1` 在 NoMod 下的 `aim` 和 `speed` 属性。项目不会自行修改这两项的公式。
 
 ### Reading
 
@@ -88,6 +88,17 @@ Reading 是一个 400 ms 密度与 AR 压力基线：
 5. 累加后得到 Reading 值。
 
 它刻画短时间内的读取负担与 AR 的共同影响。它不是对视读能力的完整建模，因此应作为研究特征使用。
+
+### Slider
+
+Slider 维度由滑条构成比例和相邻滑条速度变化频率组成：
+
+```text
+slider = 0.30 × slider_count / (circle_count + slider_count)
+       + 0.70 × changed_slider_speed_transitions / slider_speed_transitions
+```
+
+滑条速度依据谱面的 `SliderMultiplier`、当前红线拍长以及继承 Timing Point 的 SV 倍率计算。少于两个滑条时速度变化频率为 `0`。该定义与 OPP 内置运行时的 `five-dimension-slider-v3` 保持一致。
 
 ### Overlap
 
@@ -191,6 +202,7 @@ final = 0.8 × d1 + 0.2 × d2
 | `normalizers/vN.bin` | 第 N 个分位数归一化器 |
 | `indexes/difficulty-main.hnsw` | 主 HNSW 索引 |
 | `indexes/difficulty-*.hnsw.sha256` | 索引校验和 |
+| `beatmaps/<BeatmapID>.osu` | 可复用的原始标准谱面；该目录只保存 `.osu` 文件 |
 | `tmp/` | 下载中的 `.part` 文件和 7z 解压临时内容 |
 
 二进制特征文件都有 32 字节文件头：原始数据 magic 为 `ODLRAW1`，归一化数据 magic 为 `ODLNORM`，并记录格式版本 `1`。随后是以 bincode 固定长度序列化的记录；SQLite 的偏移量指向每条记录。写入原始记录时，程序先追加二进制记录，再在一个 SQLite 事务中更新元数据和分析表。
@@ -206,29 +218,32 @@ SQLite 表：
 
 ## 导入官方谱包
 
-`catalog-sync` 抓取标准、精选、比赛、Loved、Chart、主题和艺术家等官方谱包目录，输出谱包 ID。`ingest-packs` 需要 Netscape 格式的 `osu.ppy.sh` Cookie：程序从 Cookie 文件中只取 `ppy.sh` 域的键值，按请求附带，不写进数据库。
+`catalog-sync` 抓取标准、精选、比赛、Loved、Chart、主题和艺术家等官方谱包目录，输出谱包 ID。传入 `--standard-only` 时，仅输出官方定义为纯 `osu!standard` 的 `S<数字>` 包 ID。批量脚本则保留完整目录：会直接排除 `ST`、`SM`、`SC` 等纯非标准包，而所有可能混合的包都会下载，以免遗漏其中的 standard 谱面；导入时仍只处理 standard `.osu`。官方公开详情页没有逐谱面模式字段，若要把混合包也精确地在下载前排除，需要另行配置 osu! API OAuth 凭据。`ingest-packs` 需要 Netscape 格式的 `osu.ppy.sh` Cookie：程序从 Cookie 文件中只取 `ppy.sh` 域的键值，按请求附带，不写进数据库。
 
 导入流程：
 
 1. 打开官方谱包详情页，提取已认证的 `packs.ppy.sh` 或 `dl.osu.ppy.sh` 下载地址。
 2. 将包下载到 `tmp/<pack-id>.part`。存在的部分文件会用 HTTP Range 尝试续传；服务器返回 `416 Range Not Satisfiable` 时会重新完整下载。
-3. 下载进度每约 250 ms 输出一次。若连续 60 秒平均速度低于 1 MiB/s，下载中断并重新连接。
+3. 下载进度每约 250 ms 输出一次。慢速连接会继续传输；仅由 HTTP 超时或连接错误触发重试。
 4. 每个谱包最多尝试 3 次，退避时间为 2 秒和 4 秒。
 5. 支持 ZIP、内嵌 `.osz` 以及 7z 容器；RAR 会明确报为不支持。
-6. 仅把能明确识别为非标准模式的谱面标记为跳过；标准谱面分析失败会保留压缩包，以便修复后重试。
+6. 仅把能明确识别为非标准模式的谱面标记为跳过；每个成功分析的标准谱面写入 `beatmaps/<BeatmapID>.osu`，不会保存背景、音频、视频或其他资源。
 7. 成功导入且没有分析失败时，删除 `.part` 文件并标记谱包为 `complete`。
 
-脚本 `scripts/import-official-packs.ps1` 将上述步骤批量化：先编译二进制、验证 Cookie、按目录顺序导入，再执行归一化、主索引构建和 `doctor` 健康检查。失败的包 ID 会写入 `failed-pack-ids.txt`，成功的数据仍会被索引。
+`download-packs` 仅下载、`ingest-downloaded` 仅导入已下载的包。前者可以通过 `--concurrency N` 并发请求；后者始终顺序运行，避免多个进程同时写 SQLite。脚本 `scripts/import-official-packs.ps1` 默认把完整数据库放在 `E:\osudata`，按批次并发下载后顺序导入，再执行归一化、主索引构建和 `doctor` 健康检查。失败的包 ID 会写入 `failed-pack-ids.txt`，成功的数据仍会被索引。
 
 ## 命令行
 
 | 命令 | 作用 |
 | --- | --- |
 | `init <data-dir>` | 创建或打开本地数据目录与 SQLite schema |
-| `catalog-sync --output <file>` | 同步官方谱包 ID 列表 |
+| `catalog-sync --output <file> [--standard-only]` | 同步官方谱包 ID；后者仅保留纯 osu!standard 包 |
 | `validate-cookie --cookie-file <file>` | 验证 Netscape Cookie 文件是否包含 `ppy.sh` Cookie |
 | `ingest-local <data-dir> <archive>` | 导入本地 ZIP、7z 或兼容压缩包 |
 | `ingest-packs <data-dir> --cookie-file <file> <pack-id...>` | 下载并导入指定官方谱包 |
+| `download-packs <data-dir> --cookie-file <file> --concurrency N <pack-id...>` | 并发下载未完成的官方谱包到临时目录 |
+| `ingest-downloaded <data-dir> <pack-id...>` | 只导入临时目录中已下载的官方谱包，不发起网络请求 |
+| `reanalyze <data-dir>` | 从 `beatmaps/*.osu` 重算当前分析版本；算法升级后无需重新下载谱包 |
 | `normalizer-fit <data-dir> --version N` | 拟合并写入第 N 个归一化版本 |
 | `index-build <data-dir> --version N` | 根据第 N 个归一化版本构建主索引 |
 | `query <data-dir> <beatmap-id> --version N --limit N` | 查找相似谱面 |
@@ -236,11 +251,14 @@ SQLite 表：
 | `export-parquet <data-dir> <output> --version N` | 导出归一化特征 Parquet |
 | `doctor <data-dir> --version N` | 检查归一化记录和索引是否可打开 |
 
+`catalog-sync`、`ingest-packs` 和 `download-packs` 均可使用 `--proxy <URL>`，支持 HTTP、HTTPS 和 SOCKS5 代理；批处理脚本对应参数为 `-Proxy <URL>`。
+
 推荐的完整顺序：
 
 ```powershell
 cargo run -- init .\data
 cargo run -- ingest-local .\data .\maps.zip
+cargo run -- reanalyze .\data
 cargo run -- normalizer-fit .\data --version 1
 cargo run -- index-build .\data --version 1
 cargo run -- doctor .\data --version 1
@@ -262,7 +280,7 @@ cargo run -- query .\data 12345 --version 1 --limit 20
 
 ## 测试
 
-集成测试覆盖了「解析 → 原始记录 → 归一化 → 构建索引 → 查询」主流程，并验证相同谱面更接近、堆叠物件的 Overlap 高于分散物件。导入模块还覆盖 Cookie 行格式、带认证下载链接提取、低速重连阈值以及非标准模式识别。
+集成测试覆盖了「解析 → 原始记录 → 归一化 → 构建索引 → 查询」主流程，并验证相同谱面更接近、堆叠物件的 Overlap 高于分散物件。分析器单元测试覆盖 Slider 构成比例、红线 BPM 与继承 SV 导致的滑条速度变化。导入模块还覆盖 Cookie 行格式、带认证下载链接提取以及非标准模式识别。
 
 执行：
 

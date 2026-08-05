@@ -25,12 +25,13 @@ hnsw = { version = "0.11", features = ["serde1"] }
 memmap2 = "0.9"
 parquet = { version = "54.3.1", default-features = false, features = ["arrow", "snap"] }
 rand_pcg = { version = "0.3", features = ["serde1"] }
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "socks"] }
 roaring = { version = "0.11", features = ["serde"] }
 rosu-map = "0.2.1"
 rosu-pp = "4.0.1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 sevenz-rust = { version = "0.6.1", default-features = false }
 sha2 = "0.10"
 space = { version = "0.17", features = ["alloc", "serde"] }
