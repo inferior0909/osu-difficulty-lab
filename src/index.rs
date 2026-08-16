@@ -38,6 +38,7 @@ struct IndexFile {
 }
 
 pub fn build_main_index(store: &FeatureStore, normalization_version: u32) -> Result<()> {
+    store.validate_star_section_stats(normalization_version)?;
     let records = store.normalized_records(normalization_version)?;
     let mut graph = Graph::new_params(WeightedL2, Params::new().ef_construction(200));
     let mut searcher = Searcher::new();
@@ -58,13 +59,41 @@ pub fn build_main_index(store: &FeatureStore, normalization_version: u32) -> Res
             normalization_version,
         },
     )?;
-    if !store.root().join("indexes/difficulty-delta.hnsw").exists() {
-        let delta = IndexFile {
-            labels: Vec::new(),
-            graph: Graph::new_params(WeightedL2, Params::new().ef_construction(200)),
-            normalization_version,
-        };
-        write_index(store.root(), "difficulty-delta.hnsw", &delta)?;
+    // A full main-index rebuild absorbs all active records, so the old delta must
+    // be replaced instead of retained (which would duplicate or mix versions).
+    let delta = IndexFile {
+        labels: Vec::new(),
+        graph: Graph::new_params(WeightedL2, Params::new().ef_construction(200)),
+        normalization_version,
+    };
+    write_index(store.root(), "difficulty-delta.hnsw", &delta)?;
+    Ok(())
+}
+
+pub fn validate_index_coverage(store: &FeatureStore, normalization_version: u32) -> Result<()> {
+    let expected = store
+        .normalized_records(normalization_version)?
+        .into_iter()
+        .map(|record| record.beatmap_id)
+        .collect::<HashSet<_>>();
+    let mut indexed = HashSet::new();
+    for name in ["difficulty-main.hnsw", "difficulty-delta.hnsw"] {
+        let path = store.root().join("indexes").join(name);
+        if !path.exists() {
+            anyhow::bail!("index is missing: {}", path.display());
+        }
+        let index = read_index(&path)?;
+        if index.normalization_version != normalization_version {
+            anyhow::bail!("index normalization version does not match dataset");
+        }
+        for id in index.labels {
+            if !indexed.insert(id) {
+                anyhow::bail!("beatmap {id} occurs in both main/delta index data");
+            }
+        }
+    }
+    if indexed != expected {
+        anyhow::bail!("main/delta index records do not match active normalized records");
     }
     Ok(())
 }
@@ -223,4 +252,89 @@ fn read_index(path: &Path) -> Result<IndexFile> {
         }
     }
     bincode::deserialize(&bytes).with_context(|| format!("invalid HNSW index: {}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{BeatmapFeatureRecord, BeatmapMetadata, DifficultyVector, RawFeatureRecord};
+    use tempfile::tempdir;
+
+    fn add_record(
+        store: &mut FeatureStore,
+        id: u64,
+        stars: f64,
+        difficulty: [f32; 5],
+    ) -> Result<BeatmapFeatureRecord> {
+        let metadata = BeatmapMetadata {
+            beatmap_id: id,
+            beatmapset_id: id / 10,
+            checksum: format!("checksum-{id}"),
+            artist: "artist".into(),
+            title: "title".into(),
+            version: "version".into(),
+            creator: "creator".into(),
+            online_url: format!("https://osu.ppy.sh/b/{id}"),
+            star_rating: stars,
+        };
+        let raw = RawFeatureRecord {
+            beatmap_id: id,
+            beatmapset_id: id / 10,
+            analyzer_version: crate::ANALYZER_VERSION,
+            mod_profile: 0,
+            ..RawFeatureRecord::default()
+        };
+        store.append_raw(&metadata, &raw)?;
+        Ok(BeatmapFeatureRecord {
+            beatmap_id: id,
+            beatmapset_id: id / 10,
+            difficulty: DifficultyVector::from_array(difficulty),
+            analyzer_version: crate::ANALYZER_VERSION,
+            normalization_version: 1,
+            mod_profile: 0,
+            ..BeatmapFeatureRecord::default()
+        })
+    }
+
+    fn index_with(records: &[BeatmapFeatureRecord], normalization_version: u32) -> IndexFile {
+        let mut graph = Graph::new_params(WeightedL2, Params::new().ef_construction(200));
+        let mut searcher = Searcher::new();
+        let mut labels = Vec::new();
+        for record in records {
+            graph.insert(record.difficulty.as_array(), &mut searcher);
+            labels.push(record.beatmap_id);
+        }
+        IndexFile {
+            labels,
+            graph,
+            normalization_version,
+        }
+    }
+
+    #[test]
+    fn statistics_cover_records_split_between_main_and_delta() -> Result<()> {
+        let temp = tempdir()?;
+        let mut store = FeatureStore::open(temp.path())?;
+        let main = add_record(&mut store, 10, 5.71, [0.1; 5])?;
+        let delta = add_record(&mut store, 20, 5.79, [0.2; 5])?;
+        store.write_normalized(1, &[main, delta])?;
+        write_index(temp.path(), "difficulty-main.hnsw", &index_with(&[main], 1))?;
+        write_index(
+            temp.path(),
+            "difficulty-delta.hnsw",
+            &index_with(&[delta], 1),
+        )?;
+
+        validate_index_coverage(&store, 1)?;
+        store.validate_star_section_stats(1)?;
+        assert_eq!(
+            store
+                .star_section_stats(1)?
+                .iter()
+                .map(|stat| stat.sample_count)
+                .sum::<u64>(),
+            2
+        );
+        Ok(())
+    }
 }

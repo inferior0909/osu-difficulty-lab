@@ -26,12 +26,19 @@ fn pipeline_normalizes_builds_and_queries() -> Result<()> {
         (30, vec![(256, 192, 0), (257, 192, 80), (256, 192, 160)]),
     ] {
         let (metadata, record) = analyzer.analyze_bytes(&map(id, &positions))?;
+        assert!(metadata.star_rating.is_finite());
+        assert_eq!(
+            osu_difficulty_lab::star_section(metadata.star_rating)?,
+            (metadata.star_rating / 0.1 + 1e-6).floor() as i64
+        );
         assert!(store.append_raw(&metadata, &record)?);
     }
     let normalizer = fit_normalizer(&mut store, 1)?;
     assert_eq!(normalizer.version, 1);
     assert_eq!(store.normalized_records(1)?.len(), 3);
     build_main_index(&store, 1)?;
+    store.validate_star_section_stats(1)?;
+    osu_difficulty_lab::validate_index_coverage(&store, 1)?;
     let query = SimilarityQuery {
         beatmap_id: 10,
         result_limit: 2,

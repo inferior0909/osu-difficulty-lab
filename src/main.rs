@@ -8,15 +8,62 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use arrow_array::{ArrayRef, Float32Array, Int64Array, RecordBatch};
 use arrow_schema::{DataType, Field, Schema};
 use clap::{Parser, Subcommand, ValueEnum};
 use osu_difficulty_lab::{
-    Analyzer, AnalyzerConfig, DownloadProgress, FeatureStore, PackDownloadEvent,
-    PackDownloadReport, PackDownloadSource, PackImporter, SimilarityQuery, SimilarityStore,
-    build_main_index, fit_normalizer,
+    Analyzer, AnalyzerConfig, BeatmapMetadata, DownloadProgress, FeatureStore, PackDownloadEvent,
+    PackDownloadReport, PackDownloadSource, PackImporter, RawFeatureRecord, SimilarityQuery,
+    SimilarityStore, build_main_index, fit_normalizer,
 };
+use sha2::{Digest, Sha256};
+
+const REANALYZE_TIMEOUT: Duration = Duration::from_secs(30);
+
+struct ReanalysisWorker {
+    requests: mpsc::Sender<Vec<u8>>,
+    results: mpsc::Receiver<Result<(BeatmapMetadata, RawFeatureRecord)>>,
+}
+
+impl ReanalysisWorker {
+    fn new() -> Self {
+        let (requests, request_rx) = mpsc::channel::<Vec<u8>>();
+        let (result_tx, results) = mpsc::channel();
+        thread::spawn(move || {
+            let analyzer = Analyzer::new(AnalyzerConfig::default());
+            while let Ok(bytes) = request_rx.recv() {
+                if result_tx.send(analyzer.analyze_bytes(&bytes)).is_err() {
+                    break;
+                }
+            }
+        });
+        Self { requests, results }
+    }
+
+    fn analyze(&mut self, bytes: Vec<u8>) -> Result<(BeatmapMetadata, RawFeatureRecord)> {
+        if self.requests.send(bytes).is_err() {
+            *self = Self::new();
+            return Err(anyhow!("analysis worker stopped unexpectedly"));
+        }
+        match self.results.recv_timeout(REANALYZE_TIMEOUT) {
+            Ok(result) => result,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                // Dropping the channels detaches a stuck dependency call. The
+                // replacement worker lets the remaining dataset continue.
+                *self = Self::new();
+                Err(anyhow!(
+                    "analysis timed out after {} seconds",
+                    REANALYZE_TIMEOUT.as_secs()
+                ))
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                *self = Self::new();
+                Err(anyhow!("analysis worker stopped unexpectedly"))
+            }
+        }
+    }
+}
 
 #[derive(Parser)]
 #[command(
@@ -261,7 +308,13 @@ fn main() -> Result<()> {
         }
         Command::Reanalyze { data_dir } => {
             let mut store = FeatureStore::open(&data_dir)?;
-            let analyzer = Analyzer::new(AnalyzerConfig::default());
+            if store.prepare_reanalysis()? {
+                println!(
+                    "algorithm snapshot changed; invalidated Analyzer v{} records and indexes",
+                    osu_difficulty_lab::ANALYZER_VERSION
+                );
+            }
+            let mut worker = ReanalysisWorker::new();
             let mut paths = fs::read_dir(data_dir.join("beatmaps"))?
                 .filter_map(|entry| entry.ok().map(|entry| entry.path()))
                 .filter(|path| path.extension().is_some_and(|extension| extension == "osu"))
@@ -272,10 +325,21 @@ fn main() -> Result<()> {
             let mut skipped = 0_usize;
             let mut failed = Vec::new();
             for (index, path) in paths.into_iter().enumerate() {
-                let result = fs::read(&path)
-                    .map_err(anyhow::Error::from)
-                    .and_then(|bytes| analyzer.analyze_bytes(&bytes))
-                    .and_then(|(metadata, record)| store.append_raw(&metadata, &record));
+                let result = (|| -> Result<bool> {
+                    let bytes = fs::read(&path)?;
+                    if let Some(beatmap_id) = path
+                        .file_stem()
+                        .and_then(|value| value.to_str())
+                        .and_then(|value| value.parse::<u64>().ok())
+                    {
+                        let checksum = hex::encode(Sha256::digest(&bytes));
+                        if store.current_analysis_matches(beatmap_id, &checksum)? {
+                            return Ok(false);
+                        }
+                    }
+                    let (metadata, record) = worker.analyze(bytes)?;
+                    store.append_raw(&metadata, &record)
+                })();
                 match result {
                     Ok(true) => inserted += 1,
                     Ok(false) => skipped += 1,
@@ -497,6 +561,8 @@ fn main() -> Result<()> {
             let store = FeatureStore::open(data_dir)?;
             let count = store.normalized_records(version)?.len();
             let _ = SimilarityStore::open(store.root(), version)?;
+            store.validate_star_section_stats(version)?;
+            osu_difficulty_lab::validate_index_coverage(&store, version)?;
             println!("healthy: {count} normalized records");
         }
     };

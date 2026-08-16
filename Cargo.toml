@@ -1,6 +1,6 @@
 [package]
 name = "osu-difficulty-lab"
-version = "0.1.0"
+version = "0.3.0"
 edition = "2024"
 description = "Versioned five-dimensional osu!standard difficulty dataset and similarity index"
 license = "MIT"
@@ -28,7 +28,7 @@ rand_pcg = { version = "0.3", features = ["serde1"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "socks"] }
 roaring = { version = "0.11", features = ["serde"] }
 rosu-map = "0.2.1"
-rosu-pp = "4.0.1"
+rosu-pp = { git = "https://github.com/Apeuriox/rosu-pp", branch = "pp-rework-202607" }
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

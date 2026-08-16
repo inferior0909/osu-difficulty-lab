@@ -232,4 +232,22 @@ pub struct BeatmapMetadata {
     pub version: String,
     pub creator: String,
     pub online_url: String,
+    /// NoMod osu!standard difficulty stars calculated by the locked rosu-pp version.
+    pub star_rating: f64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct StarSectionStats {
+    pub star_section: i64,
+    pub analyzer_version: u32,
+    pub normalization_version: u32,
+    pub sample_count: u64,
+    pub sums: [f64; 5],
+    pub sum_squares: [f64; 5],
+    pub ar_sum: f64,
+    pub cs_sum: f64,
+    pub od_sum: f64,
+    pub ar_sum_squares: f64,
+    pub cs_sum_squares: f64,
+    pub od_sum_squares: f64,
 }

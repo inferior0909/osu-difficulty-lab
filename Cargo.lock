@@ -564,7 +564,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1349,7 +1349,7 @@ dependencies = [
 
 [[package]]
 name = "osu-difficulty-lab"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "arrow-array",
@@ -1505,7 +1505,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1657,8 +1657,7 @@ checksum = "cc58d42f8f2308b4b241de147827af84179d0a318de250495c7c5e47cb701cd9"
 [[package]]
 name = "rosu-pp"
 version = "4.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "697808a7bff3a12f18f519c7111de1df1846ae5b937561d56117658626cab978"
+source = "git+https://github.com/Apeuriox/rosu-pp?branch=pp-rework-202607#9a073d29611ef936b581a08d3c5b288ef5427301"
 dependencies = [
  "divan",
  "rosu-map",
@@ -1704,7 +1703,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1979,7 +1978,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

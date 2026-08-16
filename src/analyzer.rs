@@ -68,12 +68,13 @@ impl Analyzer {
     }
 
     pub fn analyze_bytes(&self, bytes: &[u8]) -> Result<(BeatmapMetadata, RawFeatureRecord)> {
-        let parsed = self.parse(bytes)?;
+        let mut parsed = self.parse(bytes)?;
         let map = Beatmap::from_bytes(bytes)?;
         let attrs = match Difficulty::new().calculate(&map) {
             DifficultyAttributes::Osu(value) => value,
             _ => bail!("only osu!standard beatmaps are supported"),
         };
+        parsed.metadata.star_rating = attrs.stars;
         let overlap = self.overlap(&parsed.objects, parsed.ar, parsed.cs);
         let duration_ms = parsed
             .objects
@@ -122,7 +123,7 @@ impl Analyzer {
         let raw_difficulty = DifficultyVector {
             aim: attrs.aim as f32,
             speed: attrs.speed as f32,
-            reading: reading_baseline(&parsed.objects, parsed.ar, &self.config) as f32,
+            reading: attrs.reading as f32,
             slider: slider_dimension(&parsed.objects, circles, sliders),
             overlap: overlap.peak,
         };
@@ -367,31 +368,6 @@ fn ar_to_preempt(ar: f64) -> f64 {
     }
 }
 
-fn reading_baseline(objects: &[HitObject], ar: f64, config: &AnalyzerConfig) -> f64 {
-    let mut peaks = Vec::new();
-    let mut section_end = config.reading_section_ms;
-    let mut count = 0_u32;
-    for object in objects
-        .iter()
-        .filter(|object| object.kind != ObjectKind::Spinner)
-    {
-        while object.time > section_end {
-            peaks.push(count as f64 / (config.reading_section_ms / 1000.0));
-            count = 0;
-            section_end += config.reading_section_ms;
-        }
-        count += 1;
-    }
-    peaks.push(count as f64 / (config.reading_section_ms / 1000.0));
-    peaks.sort_by(|a, b| b.partial_cmp(a).unwrap_or(Ordering::Equal));
-    let ar_pressure = 1.0 + (ar.clamp(0.0, 11.0) / 10.0);
-    peaks
-        .iter()
-        .enumerate()
-        .map(|(i, peak)| peak * ar_pressure * config.reading_peak_weight_decay.powi(i as i32))
-        .sum()
-}
-
 fn min_object_distance(a: &HitObject, b: &HitObject) -> f64 {
     match (a.kind == ObjectKind::Slider, b.kind == ObjectKind::Slider) {
         (false, false) => distance((a.x, a.y), (b.x, b.y)),
@@ -620,6 +596,9 @@ fn parse_beatmap(bytes: &[u8]) -> Result<ParsedBeatmap> {
             version,
             creator,
             online_url: format!("https://osu.ppy.sh/b/{beatmap_id}"),
+            // Parsing alone does not calculate difficulty. `analyze_bytes` replaces
+            // this sentinel before metadata can be persisted.
+            star_rating: f64::NAN,
         },
         ar,
         od,
@@ -688,5 +667,19 @@ mod tests {
         let value = slider_dimension(&objects, 1.0, 3.0);
 
         assert!((value - 0.575).abs() < 1e-6);
+    }
+
+    #[test]
+    fn reading_dimension_comes_from_rosu_pp() -> Result<()> {
+        let bytes = b"osu file format v14\n\n[General]\nMode:0\n\n[Metadata]\nTitle:Reading\nArtist:Test\nCreator:Mapper\nVersion:Hard\nBeatmapID:999\nBeatmapSetID:999\n\n[Difficulty]\nHPDrainRate:5\nCircleSize:4\nOverallDifficulty:8\nApproachRate:9\n\n[TimingPoints]\n0,500,4,2,0,100,1,0\n\n[HitObjects]\n64,64,0,1,0,0:0:0:0:\n448,320,160,1,0,0:0:0:0:\n64,320,320,1,0,0:0:0:0:\n448,64,480,1,0,0:0:0:0:\n";
+        let map = Beatmap::from_bytes(bytes)?;
+        let expected = match Difficulty::new().calculate(&map) {
+            DifficultyAttributes::Osu(attributes) => attributes.reading as f32,
+            _ => unreachable!(),
+        };
+        let (_, record) = Analyzer::new(AnalyzerConfig::default()).analyze_bytes(bytes)?;
+
+        assert_eq!(record.raw_difficulty.reading, expected);
+        Ok(())
     }
 }

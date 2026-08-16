@@ -1,6 +1,6 @@
 # 实现说明
 
-本文描述 `osu-difficulty-lab v0.1.0` 当前的实现。项目是一个本地运行的 `osu!standard` 谱面分析器和相似度索引，不是在线服务，也不使用 OPP 数据。
+本文描述 `osu-difficulty-lab v0.3.0` 当前的实现。项目是一个本地运行的 `osu!standard` 谱面分析器和相似度索引，不是在线服务，也不使用 OPP 数据。
 
 ## 目标与边界
 
@@ -20,10 +20,10 @@
 .osu / 官方谱包
        │
        ▼
-解析与难度分析 ──► raw-features.bin + metadata.sqlite
+解析与难度分析 ──► raw-features.bin + metadata.sqlite（NoMod 星数/0.1★桶）
        │
        ▼
-分位数归一化 ────► features-v<N>.bin + normalizers/v<N>.bin
+分位数归一化 ────► features-v<N>.bin + normalizers/v<N>.bin + 分桶统计
        │
        ▼
 HNSW 构建 ──────► indexes/difficulty-main.hnsw
@@ -40,13 +40,15 @@ HNSW 构建 ──────► indexes/difficulty-main.hnsw
 
 | 项目 | 当前值 |
 | --- | --- |
-| 分析版本 | `3` |
-| 算法 ID | `five-dimension-slider-v3` |
-| `rosu-pp` | `4.0.1` |
-| Reading | `reading-density-ar-section-v1` |
+| 分析版本 | `4` |
+| 算法 ID | `five-dimension-slider-rosu-reading-v4` |
+| `rosu-pp` | `Apeuriox/rosu-pp@pp-rework-202607#9a073d29` |
+| Reading | `rosu-reading-pp-rework-202607-v1` |
 | Overlap | `overlap-visibility-spatial-strain-v1` |
 
-修改原始特征公式、依赖的难度实现或默认权重时，应提高 `ANALYZER_VERSION`，保留旧记录并用新版本重新分析。归一化版本独立于分析版本；同一批原始记录可以产生多个归一化版本。
+修改原始特征公式、依赖的难度实现或默认权重时应提高 `ANALYZER_VERSION`，保留旧记录并用新版本重新分析。Analyzer v4 把 Reading 从本地密度基线切换为 rework `rosu-pp` 原生属性；旧 v3 raw 记录仍保留在 append-only 文件和版本化 SQLite 指针中，但旧归一化文件与 HNSW 不可复用。OPP 会严格校验 Analyzer 版本、算法 ID、rosu-pp、Reading 和 Overlap 快照。归一化版本独立于分析版本；同一批原始记录可以产生多个归一化版本。
+
+重算支持按 `<BeatmapID>.osu` 文件名和 SHA-256 续跑：当前快照下已经存在且源文件未变化的记录不会再次进入难度计算。实际分析在可替换的工作线程中执行，单谱面上限为 30 秒；超时、panic 或解析错误会记录到 `reanalyze-failures.txt` 并继续扫描，最后以非零状态提醒发布者确认被排除的谱面。这样 rework 依赖中的病理谱面不会永久卡住整个数据集发布。
 
 ## 谱面解析与基础特征
 
@@ -69,25 +71,15 @@ HNSW 构建 ──────► indexes/difficulty-main.hnsw
 | `circle_ratio`、`slider_ratio`、`spinner_ratio` | 各类物件占总物件数的比例 |
 | `max_combo` | `rosu-pp` 给出的最大连击数 |
 
+同一次 NoMod、osu!standard 难度计算还会把 `attrs.stars` 写入 SQLite 的 `beatmaps.star_rating`，并按 `floor(star_rating / 0.1 + 1e-6)` 写入 `beatmaps.star_section`。星数不进入 `BeatmapFeatureRecord`，因此既有二进制布局和格式版本保持不变。旧数据库迁移后这两列允许暂时为 `NULL`；运行 `reanalyze` 会用保留的 `.osu` 文件补齐，缺失时归一化生成会拒绝继续。
+
 ## 五维难度特征
 
 原始难度向量的顺序固定为：`[aim, speed, reading, slider, overlap]`。
 
-### Aim、Speed
+### Aim、Speed、Reading
 
-两项分别直接取 `rosu-pp 4.0.1` 在 NoMod 下的 `aim` 和 `speed` 属性。项目不会自行修改这两项的公式。
-
-### Reading
-
-Reading 是一个 400 ms 密度与 AR 压力基线：
-
-1. 忽略转盘，将其余物件按 400 ms 分段计数。
-2. 每段密度为 `该段物件数 / 0.4 秒`。
-3. 将所有段密度由高到低排序。
-4. 第 `i` 个峰值乘以 `0.90^i`，并乘 AR 压力 `1 + clamp(AR, 0, 11) / 10`。
-5. 累加后得到 Reading 值。
-
-它刻画短时间内的读取负担与 AR 的共同影响。它不是对视读能力的完整建模，因此应作为研究特征使用。
+三项分别直接取 `Apeuriox/rosu-pp@pp-rework-202607#9a073d29` 在 NoMod 下的 `aim`、`speed` 和 `reading` 属性。项目不会自行修改这三项的公式。Reading 是该 rework 分支新增的原生难度技能结果，不再使用 v3 的 400 ms 密度与 AR 压力基线。
 
 ### Slider
 
@@ -98,7 +90,7 @@ slider = 0.30 × slider_count / (circle_count + slider_count)
        + 0.70 × changed_slider_speed_transitions / slider_speed_transitions
 ```
 
-滑条速度依据谱面的 `SliderMultiplier`、当前红线拍长以及继承 Timing Point 的 SV 倍率计算。少于两个滑条时速度变化频率为 `0`。该定义与 OPP 内置运行时的 `five-dimension-slider-v3` 保持一致。
+滑条速度依据谱面的 `SliderMultiplier`、当前红线拍长以及继承 Timing Point 的 SV 倍率计算。少于两个滑条时速度变化频率为 `0`。该定义与 OPP 内置运行时的 `five-dimension-slider-rosu-reading-v4` 保持一致。
 
 ### Overlap
 
@@ -144,6 +136,8 @@ rank(x) = (最后一个小于等于 x 的下标) / (唯一值数量 - 1)
 ```
 
 只有一个唯一值时结果为 `0`。归一化器写入 `normalizers/vN.bin`，相应完整记录写入 `features-vN.bin`。这意味着加入数据后重跑同一版本会重写该版本的归一化结果；若要保留可复现的历史分布，请使用新的归一化版本号。
+
+写入 `features-vN.bin` 时，程序直接按星数桶重建 `star_section_stats`。每桶保存样本数、最终 `[aim, speed, reading, slider, overlap]` 向量的总和与平方和，以及同批记录中原始 AR、CS、OD 的总和与平方和，并按 Analyzer/Normalizer 版本分键。统计采用 `f64` 累加；AR、CS、OD 不单独分桶，也不形成组合桶。每次生成先替换该 Analyzer 的旧统计，不做增量相加；分析记录状态、归一化偏移和新统计在同一个 SQLite 事务中提交。文件替换或事务失败时会恢复旧归一化文件，避免半成品统计。新增或更新原始分析会立即使旧统计失效，发布前必须重新运行归一化和 `doctor`。旧数据库中的统计表会自动补列，但原有统计行缺少新增字段，必须重新运行 `normalizer-fit` 才能通过校验。
 
 ## 相似索引与查询
 
@@ -209,10 +203,11 @@ final = 0.8 × d1 + 0.2 × d2
 
 SQLite 表：
 
-- `beatmaps`：谱面 ID、谱面集 ID、SHA-256、标题、作者、难度名、制作者、在线链接和更新时间；
+- `beatmaps`：谱面 ID、谱面集 ID、SHA-256、标题、作者、难度名、制作者、在线链接、NoMod 星数、0.1★ 分桶和更新时间；`star_section` 有区间查询索引；
 - `analyses`：每个谱面、NoMod、分析版本对应的原始/归一化偏移及状态；
 - `packs`：官方谱包下载或导入状态、来源地址和最近错误；
 - `analysis_versions`：分析版本、算法 ID、依赖/子算法版本和创建时间。
+- `star_section_stats`：按星数桶、Analyzer 版本和归一化版本保存样本数、最终五维向量及原始 AR、CS、OD 的总和与平方和。
 
 相同 `beatmap_id` 且 SHA-256 不变时不会重复写入。若校验和变化，程序追加新的原始记录并更新该谱面的元数据与偏移。
 
@@ -249,7 +244,7 @@ SQLite 表：
 | `query <data-dir> <beatmap-id> --version N --limit N` | 查找相似谱面 |
 | `export-csv <data-dir> <output> --version N` | 导出归一化特征 CSV |
 | `export-parquet <data-dir> <output> --version N` | 导出归一化特征 Parquet |
-| `doctor <data-dir> --version N` | 检查归一化记录和索引是否可打开 |
+| `doctor <data-dir> --version N` | 检查归一化记录、主/delta 索引覆盖和完整星数桶统计一致性 |
 
 `catalog-sync`、`ingest-packs` 和 `download-packs` 均可使用 `--proxy <URL>`，支持 HTTP、HTTPS 和 SOCKS5 代理；批处理脚本对应参数为 `-Proxy <URL>`。
 
@@ -280,7 +275,7 @@ cargo run -- query .\data 12345 --version 1 --limit 20
 
 ## 测试
 
-集成测试覆盖了「解析 → 原始记录 → 归一化 → 构建索引 → 查询」主流程，并验证相同谱面更接近、堆叠物件的 Overlap 高于分散物件。分析器单元测试覆盖 Slider 构成比例、红线 BPM 与继承 SV 导致的滑条速度变化。导入模块还覆盖 Cookie 行格式、带认证下载链接提取以及非标准模式识别。
+集成测试覆盖了「解析 → 原始记录 → 归一化 → 构建索引 → 查询」主流程，并验证相同谱面更接近、堆叠物件的 Overlap 高于分散物件。分析器单元测试覆盖 rosu-pp Reading 的直接取值、Slider 构成比例、红线 BPM 与继承 SV 导致的滑条速度变化。导入模块还覆盖 Cookie 行格式、带认证下载链接提取以及非标准模式识别。
 
 执行：
 
