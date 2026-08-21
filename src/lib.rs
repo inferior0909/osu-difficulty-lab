@@ -5,6 +5,12 @@
 mod analyzer;
 mod importer;
 mod index;
+mod mania_analyzer;
+mod mania_export;
+mod mania_index;
+mod mania_normalizer;
+mod mania_storage;
+mod mania_types;
 mod normalizer;
 mod storage;
 mod types;
@@ -15,6 +21,12 @@ pub use importer::{
     PackImporter,
 };
 pub use index::{SimilarityStore, build_main_index, validate_index_coverage};
+pub use mania_analyzer::{ManiaAnalyzeError, ManiaAnalyzer};
+pub use mania_export::{export_mania_csv, export_mania_parquet};
+pub use mania_index::{ManiaSimilarityStore, build_mania_index, validate_mania_index_coverage};
+pub use mania_normalizer::{ManiaNormalizer, fit_mania_normalizer, overall_intensity};
+pub use mania_storage::ManiaFeatureStore;
+pub use mania_types::*;
 pub use normalizer::{Normalizer, fit_normalizer};
 pub use storage::{FeatureStore, star_section};
 pub use types::*;
@@ -27,3 +39,8 @@ pub const ROSU_PP_VERSION: &str = "Apeuriox/rosu-pp@pp-rework-202607#9a073d29";
 pub const READING_ALGORITHM_VERSION: &str = "rosu-reading-pp-rework-202607-v1";
 pub const OVERLAP_ALGORITHM_VERSION: &str = "overlap-visibility-spatial-strain-v1";
 pub const RAW_FEATURE_FILE: &str = "raw-features.bin";
+
+/// Independent algorithm version for the osu!mania similarity dataset.
+pub const MANIA_ANALYZER_VERSION: u32 = 1;
+pub const MANIA_ANALYZER_ALGORITHM_ID: &str = "mania-roxy-interlude-similarity-v1";
+pub const MANIA_RAW_FEATURE_FILE: &str = "mania-raw-features.bin";

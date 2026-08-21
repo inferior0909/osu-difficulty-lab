@@ -13,13 +13,17 @@ use arrow_array::{ArrayRef, Float32Array, Int64Array, RecordBatch};
 use arrow_schema::{DataType, Field, Schema};
 use clap::{Parser, Subcommand, ValueEnum};
 use osu_difficulty_lab::{
-    Analyzer, AnalyzerConfig, BeatmapMetadata, DownloadProgress, FeatureStore, PackDownloadEvent,
-    PackDownloadReport, PackDownloadSource, PackImporter, RawFeatureRecord, SimilarityQuery,
-    SimilarityStore, build_main_index, fit_normalizer,
+    Analyzer, AnalyzerConfig, BeatmapMetadata, DownloadProgress, FeatureStore, ManiaAnalyzeError,
+    ManiaAnalyzer, ManiaBeatmapMetadata, ManiaFeatureStore, ManiaNormalizer, ManiaRawFeatureRecord,
+    ManiaSimilarityQuery, ManiaSimilarityStore, PackDownloadEvent, PackDownloadReport,
+    PackDownloadSource, PackImporter, RawFeatureRecord, SimilarityQuery, SimilarityStore,
+    build_main_index, build_mania_index, export_mania_csv, export_mania_parquet,
+    fit_mania_normalizer, fit_normalizer, validate_mania_index_coverage,
 };
 use sha2::{Digest, Sha256};
 
 const REANALYZE_TIMEOUT: Duration = Duration::from_secs(30);
+const MANIA_REANALYZE_TIMEOUT: Duration = Duration::from_secs(30);
 
 struct ReanalysisWorker {
     requests: mpsc::Sender<Vec<u8>>,
@@ -63,6 +67,66 @@ impl ReanalysisWorker {
             }
         }
     }
+}
+
+struct ManiaTimedWorker {
+    requests: mpsc::Sender<(Vec<u8>, Option<u64>)>,
+    results: mpsc::Receiver<
+        std::result::Result<(ManiaBeatmapMetadata, ManiaRawFeatureRecord), ManiaAnalyzeError>,
+    >,
+}
+
+impl ManiaTimedWorker {
+    fn new() -> Self {
+        let (requests, request_rx) = mpsc::channel::<(Vec<u8>, Option<u64>)>();
+        let (result_tx, results) = mpsc::channel();
+        thread::spawn(move || {
+            let analyzer = ManiaAnalyzer::new();
+            while let Ok((bytes, beatmap_id)) = request_rx.recv() {
+                let result = match beatmap_id {
+                    Some(beatmap_id) => analyzer.analyze_bytes_with_beatmap_id(&bytes, beatmap_id),
+                    None => analyzer.analyze_bytes(&bytes),
+                };
+                if result_tx.send(result).is_err() {
+                    break;
+                }
+            }
+        });
+        Self { requests, results }
+    }
+
+    fn analyze(
+        &mut self,
+        bytes: Vec<u8>,
+        source_beatmap_id: Option<u64>,
+    ) -> Result<std::result::Result<(ManiaBeatmapMetadata, ManiaRawFeatureRecord), ManiaAnalyzeError>>
+    {
+        if self.requests.send((bytes, source_beatmap_id)).is_err() {
+            *self = Self::new();
+            return Err(anyhow!("mania analysis worker stopped unexpectedly"));
+        }
+        match self.results.recv_timeout(MANIA_REANALYZE_TIMEOUT) {
+            Ok(result) => Ok(result),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                *self = Self::new();
+                Err(anyhow!(
+                    "mania analysis timed out after {} seconds",
+                    MANIA_REANALYZE_TIMEOUT.as_secs()
+                ))
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                *self = Self::new();
+                Err(anyhow!("mania analysis worker stopped unexpectedly"))
+            }
+        }
+    }
+}
+
+enum ManiaReanalysisOutcome {
+    Analyzed(Box<(ManiaBeatmapMetadata, ManiaRawFeatureRecord)>),
+    Unsupported,
+    Failed(String),
+    Skipped,
 }
 
 #[derive(Parser)]
@@ -160,6 +224,56 @@ enum Command {
         version: u32,
     },
     Doctor {
+        data_dir: PathBuf,
+        #[arg(long, default_value_t = 1)]
+        version: u32,
+    },
+    /// Initialize the independent osu!mania feature store.
+    ManiaInit {
+        data_dir: PathBuf,
+    },
+    /// Analyze retained 4K/6K/7K beatmaps/*.osu into mania raw features.
+    ManiaReanalyze {
+        data_dir: PathBuf,
+        #[arg(long)]
+        threads: Option<usize>,
+    },
+    ManiaNormalizerFit {
+        data_dir: PathBuf,
+        #[arg(long, default_value_t = 1)]
+        version: u32,
+    },
+    ManiaIndexBuild {
+        data_dir: PathBuf,
+        #[arg(long, default_value_t = 1)]
+        version: u32,
+    },
+    ManiaQuery {
+        data_dir: PathBuf,
+        #[arg(long, conflicts_with = "file")]
+        beatmap_id: Option<u64>,
+        #[arg(long, conflicts_with = "beatmap_id")]
+        file: Option<PathBuf>,
+        #[arg(long, default_value_t = 1)]
+        version: u32,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        #[arg(long)]
+        include_same_set: bool,
+    },
+    ManiaExportCsv {
+        data_dir: PathBuf,
+        output: PathBuf,
+        #[arg(long, default_value_t = 1)]
+        version: u32,
+    },
+    ManiaExportParquet {
+        data_dir: PathBuf,
+        output: PathBuf,
+        #[arg(long, default_value_t = 1)]
+        version: u32,
+    },
+    ManiaDoctor {
         data_dir: PathBuf,
         #[arg(long, default_value_t = 1)]
         version: u32,
@@ -565,7 +679,299 @@ fn main() -> Result<()> {
             osu_difficulty_lab::validate_index_coverage(&store, version)?;
             println!("healthy: {count} normalized records");
         }
+        Command::ManiaInit { data_dir } => {
+            ManiaFeatureStore::open(data_dir)?;
+        }
+        Command::ManiaReanalyze { data_dir, threads } => {
+            run_mania_reanalysis(&data_dir, threads)?;
+        }
+        Command::ManiaNormalizerFit { data_dir, version } => {
+            let mut store = ManiaFeatureStore::open(data_dir)?;
+            let normalizer = fit_mania_normalizer(&mut store, version)?;
+            println!("wrote mania normalization v{}", normalizer.version);
+        }
+        Command::ManiaIndexBuild { data_dir, version } => {
+            let store = ManiaFeatureStore::open(data_dir)?;
+            build_mania_index(&store, version)?;
+            println!("wrote mania bucket index v{version}");
+        }
+        Command::ManiaQuery {
+            data_dir,
+            beatmap_id,
+            file,
+            version,
+            limit,
+            include_same_set,
+        } => {
+            if beatmap_id.is_none() == file.is_none() {
+                anyhow::bail!("provide exactly one of --beatmap-id or --file");
+            }
+            let store = ManiaFeatureStore::open(&data_dir)?;
+            let similarity = ManiaSimilarityStore::open(&data_dir, version)?;
+            let query = ManiaSimilarityQuery {
+                result_limit: limit,
+                include_same_set,
+            };
+            let results = if let Some(beatmap_id) = beatmap_id {
+                similarity.query_by_id(&store, beatmap_id, query)?
+            } else {
+                let path = file.expect("checked above");
+                let bytes = fs::read(&path)?;
+                let source_beatmap_id = path
+                    .file_stem()
+                    .and_then(|value| value.to_str())
+                    .and_then(|value| value.parse::<u64>().ok());
+                let analyzer = ManiaAnalyzer::new();
+                let (_, raw) = match source_beatmap_id {
+                    Some(beatmap_id) => analyzer.analyze_bytes_with_beatmap_id(&bytes, beatmap_id),
+                    None => analyzer.analyze_bytes(&bytes),
+                }
+                .map_err(anyhow::Error::new)?;
+                let target = ManiaNormalizer::load(&data_dir, version)?.transform(&raw)?;
+                similarity.query_record(&store, target, query)?
+            };
+            for result in results {
+                println!(
+                    "{}\tset={}\t{}K\tband={}\tpct={:.4}\tfamily={}\tpattern={}\tdistance={:.5}\tskill={:.5}\tpatterns={:.5}\tstructure={:.5}\tdifficulty={:.5}\tcontext={:.5}\t{} - {} [{}]",
+                    result.beatmap_id,
+                    result.beatmapset_id,
+                    result.key_count,
+                    result.difficulty_band,
+                    result.difficulty_percentile,
+                    result.mode_family.as_str(),
+                    result.dominant_pattern.as_str(),
+                    result.final_distance,
+                    result.components.skill,
+                    result.components.pattern,
+                    result.components.structure,
+                    result.components.difficulty,
+                    result.components.context,
+                    result.artist,
+                    result.title,
+                    result.version,
+                );
+            }
+        }
+        Command::ManiaExportCsv {
+            data_dir,
+            output,
+            version,
+        } => {
+            let store = ManiaFeatureStore::open(data_dir)?;
+            export_mania_csv(output, &store.normalized_records(version)?)?;
+        }
+        Command::ManiaExportParquet {
+            data_dir,
+            output,
+            version,
+        } => {
+            let store = ManiaFeatureStore::open(data_dir)?;
+            export_mania_parquet(output, &store.normalized_records(version)?)?;
+        }
+        Command::ManiaDoctor { data_dir, version } => {
+            let store = ManiaFeatureStore::open(&data_dir)?;
+            let records = store.normalized_records(version)?;
+            let count = records.len();
+            let normalizer = ManiaNormalizer::load(&data_dir, version)?;
+            if normalizer.version != version {
+                anyhow::bail!("mania normalizer version mismatch");
+            }
+            validate_mania_index_coverage(&store, version)?;
+            let _ = ManiaSimilarityStore::open(&data_dir, version)?;
+            let (eligible, unsupported, failed) = store.scan_counts()?;
+            if eligible != count {
+                anyhow::bail!(
+                    "mania scan has {eligible} eligible maps but only {count} normalized records"
+                );
+            }
+            if failed != 0 {
+                anyhow::bail!("mania scan still has {failed} failed beatmaps");
+            }
+            let mut key_counts = [0_usize; 3];
+            let mut band_counts = [0_usize; 10];
+            let mut family_counts = [0_usize; 4];
+            for record in records {
+                let key_index = match record.key_count {
+                    4 => 0,
+                    6 => 1,
+                    7 => 2,
+                    key_count => anyhow::bail!("indexed unsupported key count {key_count}K"),
+                };
+                key_counts[key_index] += 1;
+                band_counts[record.difficulty_band as usize] += 1;
+                family_counts[record.mode_family as usize] += 1;
+            }
+            println!(
+                "healthy: normalized={count} eligible={eligible} unsupported={unsupported} failed={failed} keys=4K:{},6K:{},7K:{} families=RC:{},HB:{},Mix:{},LN:{} bands={band_counts:?}",
+                key_counts[0],
+                key_counts[1],
+                key_counts[2],
+                family_counts[0],
+                family_counts[1],
+                family_counts[2],
+                family_counts[3],
+            );
+        }
     };
+    Ok(())
+}
+
+fn run_mania_reanalysis(data_dir: &PathBuf, requested_threads: Option<usize>) -> Result<()> {
+    let mut store = ManiaFeatureStore::open(data_dir)?;
+    if store.prepare_reanalysis()? {
+        println!(
+            "mania algorithm snapshot changed; invalidated Analyzer v{} indexes",
+            osu_difficulty_lab::MANIA_ANALYZER_VERSION
+        );
+    }
+    let mut paths = fs::read_dir(data_dir.join("beatmaps"))?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.extension().is_some_and(|extension| extension == "osu"))
+        .collect::<Vec<_>>();
+    paths.sort();
+    let total = paths.len();
+    if total == 0 {
+        anyhow::bail!(
+            "no .osu files found in {}",
+            data_dir.join("beatmaps").display()
+        );
+    }
+    let worker_count = requested_threads
+        .unwrap_or_else(|| thread::available_parallelism().map_or(1, usize::from))
+        .clamp(1, 32);
+    println!("mania reanalysis: {total} files, {worker_count} workers");
+
+    let (task_tx, task_rx) = mpsc::channel::<(usize, PathBuf)>();
+    let task_rx = Arc::new(Mutex::new(task_rx));
+    let (result_tx, result_rx) = mpsc::channel::<(usize, PathBuf, ManiaReanalysisOutcome)>();
+    let mut outcomes = (0..total).map(|_| None).collect::<Vec<_>>();
+    let mut scheduled = 0_usize;
+
+    for (index, path) in paths.into_iter().enumerate() {
+        let retained_id = path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .and_then(|value| value.parse::<u64>().ok());
+        if let Some(beatmap_id) = retained_id
+            && store.has_current_analysis(beatmap_id)?
+        {
+            let bytes = fs::read(&path)?;
+            let checksum = hex::encode(Sha256::digest(&bytes));
+            if store.current_analysis_matches(beatmap_id, &checksum)? {
+                outcomes[index] = Some(ManiaReanalysisOutcome::Skipped);
+                continue;
+            }
+        }
+        task_tx.send((index, path))?;
+        scheduled += 1;
+    }
+    drop(task_tx);
+
+    let mut handles = Vec::with_capacity(worker_count);
+    for _ in 0..worker_count {
+        let task_rx = Arc::clone(&task_rx);
+        let result_tx = result_tx.clone();
+        handles.push(thread::spawn(move || {
+            let mut worker = ManiaTimedWorker::new();
+            loop {
+                let task = {
+                    let receiver = task_rx.lock().expect("mania task receiver poisoned");
+                    receiver.recv()
+                };
+                let Ok((index, path)) = task else {
+                    break;
+                };
+                let source_beatmap_id = path
+                    .file_stem()
+                    .and_then(|value| value.to_str())
+                    .and_then(|value| value.parse::<u64>().ok());
+                let outcome = match fs::read(&path) {
+                    Ok(bytes) => match worker.analyze(bytes, source_beatmap_id) {
+                        Ok(Ok((metadata, record))) => {
+                            ManiaReanalysisOutcome::Analyzed(Box::new((metadata, record)))
+                        }
+                        Ok(Err(ManiaAnalyzeError::UnsupportedKeyCount(_))) => {
+                            ManiaReanalysisOutcome::Unsupported
+                        }
+                        Ok(Err(error)) => ManiaReanalysisOutcome::Failed(error.to_string()),
+                        Err(error) => ManiaReanalysisOutcome::Failed(error.to_string()),
+                    },
+                    Err(error) => ManiaReanalysisOutcome::Failed(error.to_string()),
+                };
+                if result_tx.send((index, path, outcome)).is_err() {
+                    break;
+                }
+            }
+        }));
+    }
+    drop(result_tx);
+
+    let mut received = 0_usize;
+    while received < scheduled {
+        let (index, path, outcome) = result_rx
+            .recv()
+            .map_err(|_| anyhow!("mania worker pool stopped before all files completed"))?;
+        outcomes[index] = Some(match outcome {
+            ManiaReanalysisOutcome::Failed(error) => {
+                ManiaReanalysisOutcome::Failed(format!("{}: {error}", path.display()))
+            }
+            other => other,
+        });
+        received += 1;
+    }
+    for handle in handles {
+        handle
+            .join()
+            .map_err(|_| anyhow!("mania analysis worker panicked"))?;
+    }
+
+    let mut inserted = 0_usize;
+    let mut skipped = 0_usize;
+    let mut unsupported = 0_usize;
+    let mut failures = Vec::new();
+    for (index, outcome) in outcomes.into_iter().enumerate() {
+        match outcome.ok_or_else(|| anyhow!("mania file {} has no analysis outcome", index + 1))? {
+            ManiaReanalysisOutcome::Analyzed(analyzed) => {
+                let (metadata, record) = *analyzed;
+                if store.append_raw(&metadata, &record)? {
+                    inserted += 1;
+                } else {
+                    skipped += 1;
+                }
+            }
+            ManiaReanalysisOutcome::Unsupported => unsupported += 1,
+            ManiaReanalysisOutcome::Failed(error) => failures.push(error),
+            ManiaReanalysisOutcome::Skipped => skipped += 1,
+        }
+        if index + 1 == total || (index + 1) % 1000 == 0 {
+            println!(
+                "mania reanalyze progress: {}/{} inserted={} skipped={} unsupported={} failed={}",
+                index + 1,
+                total,
+                inserted,
+                skipped,
+                unsupported,
+                failures.len(),
+            );
+        }
+    }
+    let eligible = inserted + skipped;
+    store.set_scan_counts(eligible, unsupported, failures.len())?;
+    let failure_log = data_dir.join("mania-reanalyze-failures.txt");
+    if failures.is_empty() {
+        if failure_log.exists() {
+            fs::remove_file(failure_log)?;
+        }
+    } else {
+        fs::write(&failure_log, failures.join("\n"))?;
+        anyhow::bail!(
+            "{} of {} mania files failed; see {}",
+            failures.len(),
+            total,
+            failure_log.display()
+        );
+    }
+    println!("mania reanalysis complete: eligible={eligible} unsupported={unsupported} failed=0");
     Ok(())
 }
 

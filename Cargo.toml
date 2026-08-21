@@ -2,7 +2,7 @@
 name = "osu-difficulty-lab"
 version = "0.3.0"
 edition = "2024"
-description = "Versioned five-dimensional osu!standard difficulty dataset and similarity index"
+description = "Versioned osu!standard and osu!mania difficulty datasets and similarity indexes"
 license = "MIT"
 repository = "https://github.com/osuplusplus/osu-difficulty-lab"
 

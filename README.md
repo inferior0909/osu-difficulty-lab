@@ -1,6 +1,6 @@
 # osu-difficulty-lab
 
-`osu-difficulty-lab` 是一个用于分析 `osu!standard` 谱面的 Rust 工具。
+`osu-difficulty-lab` 是一个用于分析 `osu!standard` 谱面的 Rust 工具，同时提供完全隔离的 `osu!mania` 相似谱面数据管线。
 
 它会把谱面转换成五个难度特征：瞄准、速度、读图、滑条和物件重叠，并在本地建立相似谱面索引。你可以用它查找「玩法和手感接近」的谱面，也可以导出数据做研究。
 
@@ -15,6 +15,8 @@
 - 默认官方导入数据库为 `E:\osudata`，其中同时保存 SQLite、特征、索引与可复用的 `.osu` 源文件。
 - SQLite 会保存 `Apeuriox/rosu-pp` 的 `pp-rework-202607` 固定快照（`9a073d29`）计算的 NoMod 星数和 0.1★ 分桶；每个桶同时记录五维归一化特征及原始 AR、CS、OD 的分布统计，供 OPP 动态推荐使用。
 - 数据和索引不提交到 Git；需要分发时请使用 Release 附件。
+
+mania 管线只接受 NoMod 4K/6K/7K，使用项目内置的纯 Rust 结构应变与键型分析，不调用 osu! 官方难度、Roxy 最终段位模型或 MinaCalc，也不会修改 standard 数据文件。
 
 `v0.3.0` 数据集包含 147,568 张 Analyzer v4 记录。谱面 `2571051`、`2573164`、`2628991` 在固定 rework 快照中单张计算超过 30 秒，因此未进入发布索引并保留在失败清单中。该数据集需要包含 Analyzer v4 runtime 的 OPP（`5c5d2cf` 或更新版本）。
 
@@ -64,6 +66,39 @@ cargo run -- ingest-packs .\data --cookie-file C:\secure\osu-cookies.txt --proxy
 
 - [实现说明](docs/implementation.md)：数据流程、特征算法、存储格式、索引、导入与恢复机制。
 - [命令说明](docs/implementation.md#命令行)：所有 CLI 命令及其用途。
+
+## osu!mania Ranked 原始谱面
+
+`scripts/download-ranked-mania.ps1` 是与 standard 分析数据完全隔离的原始语料下载脚本：它通过 osu! OAuth API 枚举所有包含 mania 难度的 Ranked 谱面集，再筛选每个谱面集中实际 `ranked` 的 mania 难度，逐张下载 `.osu` 文件（因此不会漏掉 mixed set）。需要安装 `sqlite3`、在 osu! 账号页创建 OAuth 应用，以及导出已登录浏览器的 Netscape Cookie：
+
+```powershell
+.\scripts\download-ranked-mania.ps1 -ClientId <client-id> -ClientSecret <client-secret> -CookieFile C:\secure\osu-cookies.txt
+```
+
+首次可用 `-InitializeOnly` 只创建 `E:\osu-mania-ranked\mania-ranked.sqlite` 和 `mania_ranked_beatmaps` 表。完整运行会保存可续跑的目录、catalogue、CSV manifest 及失败清单；不要把它们放进 standard 的 `E:\osudata`。
+
+### mania 分析与相似检索
+
+下载完成后，在同一个语料目录生成独立的 mania 特征、分位归一化和 bucket 索引：
+
+```powershell
+cargo run --release -- mania-reanalyze E:\osu-mania-ranked
+cargo run --release -- mania-normalizer-fit E:\osu-mania-ranked --version 1
+cargo run --release -- mania-index-build E:\osu-mania-ranked --version 1
+cargo run --release -- mania-doctor E:\osu-mania-ranked --version 1
+```
+
+可按库内 BeatmapID 或任意本地 `.osu` 文件查询；结果默认排除同一 beatmapset：
+
+```powershell
+cargo run --release -- mania-query E:\osu-mania-ranked --beatmap-id 1001518 --version 1 --limit 20
+cargo run --release -- mania-query E:\osu-mania-ranked --file C:\maps\target.osu --version 1 --include-same-set
+
+cargo run --release -- mania-export-csv E:\osu-mania-ranked E:\osu-mania-ranked\mania-v1.csv --version 1
+cargo run --release -- mania-export-parquet E:\osu-mania-ranked E:\osu-mania-ranked\mania-v1.parquet --version 1
+```
+
+查询只比较相同键数，先从目标难度分位层取候选；若候选总量或同模式族样本过少，会自动向相邻难度层扩展，再按强度组成、键型占比、结构统计、总体难度、BPM 与有效时长精确排序。实现细节和磁盘格式见 [实现说明](docs/implementation.md#osumania-相似谱面管线)。参考算法与许可记录见 [第三方说明](THIRD_PARTY_NOTICES.md)。
 
 ## 验证
 

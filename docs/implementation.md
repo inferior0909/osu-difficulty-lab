@@ -1,6 +1,6 @@
 # 实现说明
 
-本文描述 `osu-difficulty-lab v0.3.0` 当前的实现。项目是一个本地运行的 `osu!standard` 谱面分析器和相似度索引，不是在线服务，也不使用 OPP 数据。
+本文描述 `osu-difficulty-lab v0.3.0` 当前的实现。项目包含本地运行、数据格式完全隔离的 `osu!standard` 与 `osu!mania` 谱面分析和相似检索管线，不是在线服务，也不使用 OPP 数据。
 
 ## 目标与边界
 
@@ -227,6 +227,38 @@ SQLite 表：
 
 `download-packs` 仅下载、`ingest-downloaded` 仅导入已下载的包。前者可以通过 `--concurrency N` 并发请求；后者始终顺序运行，避免多个进程同时写 SQLite。脚本 `scripts/import-official-packs.ps1` 默认把完整数据库放在 `E:\osudata`，按批次并发下载后顺序导入，再执行归一化、主索引构建和 `doctor` 健康检查。失败的包 ID 会写入 `failed-pack-ids.txt`，成功的数据仍会被索引。
 
+## osu!mania 相似谱面管线
+
+mania 管线只处理 `Mode:3` 且 `CircleSize` 为 4、6、7 的 NoMod `.osu` 文件。它不调用 `rosu-pp` 难度、osu! 官方星数、Roxy 最终段位、Azusa/Daniel/Sunny 或 MinaCalc。Roxy 仅作为 burst/sustain 应变和尾部分位聚合的设计参考；键型分类按文档独立实现。算法快照为 `mania-roxy-interlude-similarity-v1`、Analyzer v1。
+
+### 数据流与存储
+
+```text
+beatmaps/*.osu
+  -> mania-raw-features.bin + mania-metadata.sqlite
+  -> normalizers/mania-vN.bin + mania-features-vN.bin
+  -> indexes/mania-vN.buckets + .sha256
+  -> 同键数/难度层候选 + 精确风格距离
+```
+
+下载器的 `mania-ranked.sqlite`、catalog JSONL 和 manifest CSV 不参与分析状态，也不会被修改。下载语料采用数字 `.osu` 文件名作为官方 BeatmapID（少量旧 Ranked 文件的内嵌 `BeatmapID` 为 0 或误填成同 set 的另一难度）；非数字文件名与一般库外文件才回退到内嵌 ID 或内容哈希。`mania-reanalyze` 按该 ID/SHA-256 续跑，使用可替换的并行工作线程并为单谱面设置 30 秒上限；非 4/6/7K 计入 unsupported，真正的解析/分析错误写入 `mania-reanalyze-failures.txt` 并使命令失败。
+
+### 24 维特征
+
+- 强度轴 8 维：Speed、Hand Stream、Jack、Chordjack、Technical、Stamina、Long Note、Course。
+- 键型时间占比 6 维：Stream、Chordstream、Jacks、Coordination、Density、Wildcard。
+- 结构统计 10 维：和弦/大和弦/rotation/anchor 比例、节奏与转移熵、LN 比例、长条占用、HB 行比例、peak-to-sustain gap。
+
+2 ms 内事件合并为一行。LN 头参与普通按压应变，LN 尾、活跃占用、释放压力与 HB 行进入 Long Note；4K/6K 使用左右区，7K 中央列作为独立中立区。各强度流分别维护 burst 与 sustain 状态，再使用 q97、q90、top 4% 均值、q75、2.4 次幂均值、q50 和真实 400 ms section peak 聚合。
+
+### 分位难度与检索
+
+归一化按 4K/6K/7K 分开拟合经验分位。总体强度为 `0.50 × 最大轴 + 0.30 × RMS + 0.20 × 最强三轴均值`，再映射为同键数 percentile 和 0–9 难度层。
+
+查询以键数为硬边界，从目标难度层向两侧扩展，直到候选数达到 `max(256, 4×limit)` 且同模式族达到 `max(32, 2×limit)`，或已覆盖全部层。RC/LN/HB/Mix 不作硬过滤，从而允许稀有 LN 或极端难度回退到结构最接近的混合谱面。
+
+最终距离为：35% 强度组成 Hellinger、30% 核心键型占比 Hellinger、20% 结构统计 RMS、10% 难度 percentile 差、5% 对数 BPM/有效时长差。默认排除自身和同一 beatmapset；相同距离按 BeatmapID 排序。库外文件只使用已发布 normalizer 即时转换，不写数据库。
+
 ## 命令行
 
 | 命令 | 作用 |
@@ -245,6 +277,14 @@ SQLite 表：
 | `export-csv <data-dir> <output> --version N` | 导出归一化特征 CSV |
 | `export-parquet <data-dir> <output> --version N` | 导出归一化特征 Parquet |
 | `doctor <data-dir> --version N` | 检查归一化记录、主/delta 索引覆盖和完整星数桶统计一致性 |
+| `mania-init <data-dir>` | 创建独立的 mania 元数据、特征和索引目录 |
+| `mania-reanalyze <data-dir> [--threads N]` | 续跑分析 `beatmaps/*.osu` 中的 4K/6K/7K mania 谱面 |
+| `mania-normalizer-fit <data-dir> --version N` | 按键数独立拟合 mania 经验分位并写入 24 维归一化记录 |
+| `mania-index-build <data-dir> --version N` | 构建 `(key_count, difficulty_band)` 精确检索 bucket |
+| `mania-query <data-dir> (--beatmap-id ID \| --file PATH) --version N --limit N [--include-same-set]` | 以库内 ID 或库外 `.osu` 查找同键数相似谱面 |
+| `mania-export-csv <data-dir> <output> --version N` | 导出 mania 特征 CSV |
+| `mania-export-parquet <data-dir> <output> --version N` | 导出 mania 特征 Parquet |
+| `mania-doctor <data-dir> --version N` | 校验 mania 归一化、bucket checksum、覆盖率和扫描计数 |
 
 `catalog-sync`、`ingest-packs` 和 `download-packs` 均可使用 `--proxy <URL>`，支持 HTTP、HTTPS 和 SOCKS5 代理；批处理脚本对应参数为 `-Proxy <URL>`。
 
