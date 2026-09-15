@@ -1,0 +1,11 @@
+[package]
+name = "mania-pattern"
+version = "0.1.0"
+edition = "2024"
+description = "osu!mania key-pattern analysis ported from osumania_map_analyser"
+license = "MIT"
+repository = "https://github.com/osuplusplus/osu-difficulty-lab"
+
+[dependencies]
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }

@@ -1202,6 +1202,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "mania-pattern"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+]
+
+[[package]]
 name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1358,6 +1366,7 @@ dependencies = [
  "clap",
  "hex",
  "hnsw",
+ "mania-pattern",
  "memmap2",
  "parquet",
  "rand_pcg 0.3.1",

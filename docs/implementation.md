@@ -236,10 +236,40 @@ mania 管线只处理 `Mode:3` 且 `CircleSize` 为 4、6、7 的 NoMod `.osu` �
 ```text
 beatmaps/*.osu
   -> mania-raw-features.bin + mania-metadata.sqlite
+  -> mania-mma-features.bin + mania_mma_analyses（可选，按 NM/DT/HT 三份键型记录）
   -> normalizers/mania-vN.bin + mania-features-vN.bin
   -> indexes/mania-vN.buckets + .sha256
   -> 同键数/难度层候选 + 精确风格距离
 ```
+
+### 键型记录（`crates/mania-pattern`）
+
+`crates/mania-pattern` 是 osumania_map_analyser 键型分析的 Rust 移植，固定提交
+`70e2bd92524e093ee94ca9cb6cc159ec223faa04`，模块与 mania_map_analyser 的文件一一对应：
+
+| mania_map_analyser | 这里 |
+| --- | --- |
+| `js/parser/patternOsuParser.js`、`js/parser/noteColumn.js` | `parser.rs` |
+| `js/patterns/primitives.js` | `primitives.rs` |
+| `js/patterns/patternsDef.js`、`findPatterns.js` | `patterns.rs` |
+| `js/patterns/clustering.js` | `clustering.rs` |
+| `js/patterns/categorise.js` | `categorise.rs` |
+| `js/patterns/summary.js` | `summary.rs` |
+| `js/patterns/config.js` | `config.rs` |
+
+移植保留 mania_map_analyser 的常量、匹配顺序、取整方式与稳定性排序。主模式取重要度最高的簇的细分键型，
+不使用覆盖率最高的类别。`features.rs` 另外计算六类覆盖率（区间并集 ÷ 首尾音符间时长，
+允许重叠、不归一化到 1）、细分键型占比、平均/峰值/持续 NPS、最长持续段、空窗比例与
+相邻时间窗变化量。DT/HT 先按倍率缩放谱面再分析（`rate.rs`），不使用 NoMod 特征估算。
+
+记录写入 `mania-mma-features.bin`（8 字节头 `ODLMMA1\0`），偏移登记在
+`mania_mma_analyses(beatmap_id, game_mod, mma_version, checksum, mma_offset, status)`；
+校验值变化会重新分析，未做 `mania-reanalyze` 的谱面会被跳过。该步骤是可选的，
+不影响原有 raw/normalized/index 文件与 standard 数据。
+
+`examples/mma_parity.rs` 用固定版本的 JavaScript 实现对拍：传入语料清单与参考报告，
+逐字段比较簇、主模式、模式标签、RC/LN 比例与派生特征。`tests/mania_mma.rs` 用自造合成谱面
+做同样的比较，夹具放在 `tests/fixtures/mma/`。
 
 下载器的 `mania-ranked.sqlite`、catalog JSONL 和 manifest CSV 不参与分析状态，也不会被修改。下载语料采用数字 `.osu` 文件名作为官方 BeatmapID（少量旧 Ranked 文件的内嵌 `BeatmapID` 为 0 或误填成同 set 的另一难度）；非数字文件名与一般库外文件才回退到内嵌 ID 或内容哈希。`mania-reanalyze` 按该 ID/SHA-256 续跑，使用可替换的并行工作线程并为单谱面设置 30 秒上限；非 4/6/7K 计入 unsupported，真正的解析/分析错误写入 `mania-reanalyze-failures.txt` 并使命令失败。
 
@@ -279,6 +309,7 @@ beatmaps/*.osu
 | `doctor <data-dir> --version N` | 检查归一化记录、主/delta 索引覆盖和完整星数桶统计一致性 |
 | `mania-init <data-dir>` | 创建独立的 mania 元数据、特征和索引目录 |
 | `mania-reanalyze <data-dir> [--threads N]` | 续跑分析 `beatmaps/*.osu` 中的 4K/6K/7K mania 谱面 |
+| `mania-mma-reanalyze <data-dir> [--mods NM,DT,HT]` | 按固定版本 osumania_map_analyser 规则生成每谱面每倍率的键型记录 |
 | `mania-normalizer-fit <data-dir> --version N` | 按键数独立拟合 mania 经验分位并写入 24 维归一化记录 |
 | `mania-index-build <data-dir> --version N` | 构建 `(key_count, difficulty_band)` 精确检索 bucket |
 | `mania-query <data-dir> (--beatmap-id ID \| --file PATH) --version N --limit N [--include-same-set]` | 以库内 ID 或库外 `.osu` 查找同键数相似谱面 |
@@ -324,3 +355,21 @@ cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test
 ```
+
+### OPP DT/HT 候选导出
+
+完成 mania-reanalyze、mania-normalizer-fit、mania-index-build 和 mania-mma-reanalyze 后，运行：
+
+```sh
+cargo run --release -- mania-mod-export <data-dir>
+```
+
+DT/HT 分别从原始谱面重算 v1 难度、风格和基础特征，归一化器沿用 NM 语料，输出 OPP 需要的 mania-mod-features-v1.bin。键型仍按各倍率独立分析。源文件必须与入库校验值一致；缺源文件的变体不生成，导出失败时保留上一次的成品。
+
+键型记录版本为 2；口径变化时提升版本，旧记录随即作废。重新执行 mania-mma-reanalyze 即可生成当前记录。这不改变 Analyzer v1 和 standard 的版本。
+
+### 推荐距离
+
+`similarity` 模块实现 OPP 使用的推荐距离：键型覆盖率、细分键型、键型簇时长、类别 BPM、SV、LN 比例差和时长差，OPP 读取同一份公式。记录以 f32 持久化，距离对拍容差 2e-6。
+
+键型区间的时间相对首个物件计时，派生特征直接使用该相对时间。本地身份谱面以 2^48 + SHA-256 前 48 位作为内部 ID，不生成官方谱面链接。

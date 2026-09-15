@@ -5,7 +5,7 @@ use thiserror::Error;
 
 use crate::{
     MANIA_ANALYZER_VERSION, ManiaBaseFeatures, ManiaBeatmapMetadata, ManiaDifficultyVector,
-    ManiaModeFamily, ManiaPattern, ManiaRawFeatureRecord, ManiaStyleVector,
+    ManiaGameMod, ManiaModeFamily, ManiaPattern, ManiaRawFeatureRecord, ManiaStyleVector,
 };
 
 const ROW_TOLERANCE_MS: f64 = 2.0;
@@ -144,7 +144,7 @@ impl ManiaAnalyzer {
         &self,
         bytes: &[u8],
     ) -> Result<(ManiaBeatmapMetadata, ManiaRawFeatureRecord), ManiaAnalyzeError> {
-        self.analyze_bytes_with_source_id(bytes, None)
+        self.analyze_bytes_with_source_id_and_mod(bytes, None, ManiaGameMod::Nm)
     }
 
     /// Analyze a downloaded beatmap while treating its source filename ID as
@@ -160,18 +160,42 @@ impl ManiaAnalyzer {
                 "source BeatmapID must be positive".into(),
             ));
         }
-        self.analyze_bytes_with_source_id(bytes, Some(beatmap_id))
+        self.analyze_bytes_with_source_id_and_mod(bytes, Some(beatmap_id), ManiaGameMod::Nm)
     }
 
-    fn analyze_bytes_with_source_id(
+    pub fn analyze_bytes_with_mod(
+        &self,
+        bytes: &[u8],
+        game_mod: ManiaGameMod,
+    ) -> Result<(ManiaBeatmapMetadata, ManiaRawFeatureRecord), ManiaAnalyzeError> {
+        self.analyze_bytes_with_source_id_and_mod(bytes, None, game_mod)
+    }
+
+    pub fn analyze_bytes_with_beatmap_id_and_mod(
+        &self,
+        bytes: &[u8],
+        beatmap_id: u64,
+        game_mod: ManiaGameMod,
+    ) -> Result<(ManiaBeatmapMetadata, ManiaRawFeatureRecord), ManiaAnalyzeError> {
+        if beatmap_id == 0 {
+            return Err(ManiaAnalyzeError::Invalid(
+                "source BeatmapID must be positive".into(),
+            ));
+        }
+        self.analyze_bytes_with_source_id_and_mod(bytes, Some(beatmap_id), game_mod)
+    }
+
+    fn analyze_bytes_with_source_id_and_mod(
         &self,
         bytes: &[u8],
         source_beatmap_id: Option<u64>,
+        game_mod: ManiaGameMod,
     ) -> Result<(ManiaBeatmapMetadata, ManiaRawFeatureRecord), ManiaAnalyzeError> {
         let mut parsed = parse_beatmap(bytes)?;
         if let Some(beatmap_id) = source_beatmap_id {
             parsed.beatmap_id = beatmap_id;
         }
+        parsed.apply_clock_rate(game_mod.rate());
         let (difficulty, style, base, family, dominant) = analyze_parsed(&parsed)?;
         let checksum = hex::encode(Sha256::digest(bytes));
         let metadata = ManiaBeatmapMetadata {
@@ -182,7 +206,11 @@ impl ManiaAnalyzer {
             title: parsed.title,
             version: parsed.version,
             creator: parsed.creator,
-            online_url: format!("https://osu.ppy.sh/b/{}", parsed.beatmap_id),
+            online_url: if parsed.beatmap_id < (1_u64 << 48) {
+                format!("https://osu.ppy.sh/b/{}", parsed.beatmap_id)
+            } else {
+                String::new()
+            },
             key_count: parsed.key_count,
             mode_family: family,
             dominant_pattern: dominant,
@@ -199,6 +227,19 @@ impl ManiaAnalyzer {
             analyzer_version: MANIA_ANALYZER_VERSION,
         };
         Ok((metadata, record))
+    }
+}
+
+impl ParsedManiaBeatmap {
+    fn apply_clock_rate(&mut self, clock_rate: f64) {
+        if (clock_rate - 1.0).abs() <= f64::EPSILON {
+            return;
+        }
+        self.bpm *= clock_rate;
+        for object in &mut self.objects {
+            object.start /= clock_rate;
+            object.end /= clock_rate;
+        }
     }
 }
 
@@ -325,7 +366,8 @@ fn parse_beatmap(bytes: &[u8]) -> Result<ParsedManiaBeatmap, ManiaAnalyzeError> 
     });
     if beatmap_id == 0 {
         let digest = Sha256::digest(bytes);
-        beatmap_id = u64::from_le_bytes(digest[..8].try_into().expect("SHA-256 prefix"));
+        beatmap_id = (1_u64 << 48)
+            + (u64::from_be_bytes(digest[..8].try_into().expect("SHA-256 prefix")) >> 16);
         if beatmap_id == 0 {
             beatmap_id = 1;
         }
@@ -1007,6 +1049,24 @@ mod tests {
     }
 
     #[test]
+    fn supports_each_v1_key_count() {
+        for key_count in [4_u8, 6, 7] {
+            let objects = (0..key_count)
+                .map(|lane| {
+                    let x = ((lane as f64 + 0.5) * 512.0 / key_count as f64).floor() as usize;
+                    format!("{x},192,{},1,0,0:0:0:0:", lane as usize * 120)
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let (metadata, record) = ManiaAnalyzer::new()
+                .analyze_bytes(&map(key_count, &objects))
+                .unwrap();
+            assert_eq!(metadata.key_count, key_count);
+            assert_eq!(record.key_count, key_count);
+        }
+    }
+
+    #[test]
     fn source_filename_id_overrides_stale_embedded_id() {
         let bytes = map(4, "64,192,0,1,0,0:0:0:0:");
         let (metadata, record) = ManiaAnalyzer::new()
@@ -1225,5 +1285,35 @@ mod tests {
         {
             assert!((left - right).abs() < 1e-5, "{left} != {right}");
         }
+    }
+
+    #[test]
+    fn clock_rate_mods_recompute_timing_bpm_and_strain() {
+        let objects = (0..64)
+            .map(|index| {
+                let x = [64, 192, 320, 448][index % 4];
+                format!("{x},192,{},1,0,0:0:0:0:", index * 150)
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let bytes = map(4, &objects);
+        let analyzer = ManiaAnalyzer::new();
+        let (_, nm) = analyzer
+            .analyze_bytes_with_mod(&bytes, ManiaGameMod::Nm)
+            .unwrap();
+        let (_, dt) = analyzer
+            .analyze_bytes_with_mod(&bytes, ManiaGameMod::Dt)
+            .unwrap();
+        let (_, ht) = analyzer
+            .analyze_bytes_with_mod(&bytes, ManiaGameMod::Ht)
+            .unwrap();
+
+        assert!((dt.base.bpm - nm.base.bpm * 1.5).abs() < 1e-4);
+        assert!((ht.base.bpm - nm.base.bpm * 0.75).abs() < 1e-4);
+        assert!((dt.base.length_seconds - nm.base.length_seconds / 1.5).abs() < 1e-4);
+        assert!((ht.base.length_seconds - nm.base.length_seconds / 0.75).abs() < 1e-4);
+        assert!(dt.base.avg_nps > nm.base.avg_nps && nm.base.avg_nps > ht.base.avg_nps);
+        assert!(dt.difficulty.speed > nm.difficulty.speed);
+        assert!(nm.difficulty.speed > ht.difficulty.speed);
     }
 }

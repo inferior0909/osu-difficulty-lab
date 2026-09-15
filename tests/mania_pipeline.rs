@@ -79,5 +79,43 @@ fn mania_pipeline_analyzes_normalizes_indexes_queries_and_exports() -> Result<()
     assert!(fs::metadata(csv)?.len() > 0);
     assert!(fs::metadata(parquet)?.len() > 0);
     assert_eq!(store.scan_counts()?, (5, 1, 0));
+    fs::create_dir_all(temp.path().join("beatmaps"))?;
+    for bytes in &corpus {
+        let (metadata, _) = analyzer.analyze_bytes(bytes)?;
+        fs::write(
+            temp.path()
+                .join("beatmaps")
+                .join(format!("{}.osu", metadata.beatmap_id)),
+            bytes,
+        )?;
+    }
+    assert_eq!(
+        osu_difficulty_lab::export_mania_mod_features(temp.path(), 1)?,
+        10
+    );
+    let sidecar = temp.path().join("mania-mod-features-v1.bin");
+    let before = fs::read(&sidecar)?;
+    assert_eq!(&before[..8], b"ODLMMV1\0");
+    let mut cursor = std::io::Cursor::new(&before[8..]);
+    let normalizer = ManiaNormalizer::load(temp.path(), 1)?;
+    for _ in 0..10 {
+        let record: osu_difficulty_lab::ManiaModFeatureRecord =
+            bincode::deserialize_from(&mut cursor)?;
+        assert_ne!(record.game_mod, osu_difficulty_lab::ManiaGameMod::Nm);
+        let source = fs::read(
+            temp.path()
+                .join("beatmaps")
+                .join(format!("{}.osu", record.beatmap_id)),
+        )?;
+        let (_, raw) = analyzer.analyze_bytes_with_mod(&source, record.game_mod)?;
+        assert_eq!(record.record, normalizer.transform(&raw)?);
+    }
+    fs::write(temp.path().join("beatmaps/10.osu"), b"changed source")?;
+    assert!(osu_difficulty_lab::export_mania_mod_features(temp.path(), 1).is_err());
+    assert_eq!(
+        fs::read(sidecar)?,
+        before,
+        "failed export must retain the previous file"
+    );
     Ok(())
 }

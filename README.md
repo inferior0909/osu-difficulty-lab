@@ -16,7 +16,7 @@
 - SQLite 会保存 `Apeuriox/rosu-pp` 的 `pp-rework-202607` 固定快照（`9a073d29`）计算的 NoMod 星数和 0.1★ 分桶；每个桶同时记录五维归一化特征及原始 AR、CS、OD 的分布统计，供 OPP 动态推荐使用。
 - 数据和索引不提交到 Git；需要分发时请使用 Release 附件。
 
-mania 管线只接受 NoMod 4K/6K/7K，使用项目内置的纯 Rust 结构应变与键型分析，不调用 osu! 官方难度、Roxy 最终段位模型或 MinaCalc，也不会修改 standard 数据文件。
+mania 管线只接受 NoMod 4K/6K/7K，使用项目内置的纯 Rust 结构应变与键型分析，不调用 osu! 官方难度、Roxy 最终段位模型或 MinaCalc，也不会修改 standard 数据文件。原有 24 维特征仍是 NoMod；键型记录按固定版本 osumania_map_analyser 的规则逐条移植为 Rust（见 `crates/mania-pattern`），并对 NM/DT/HT 分别分析。
 
 `v0.3.0` 数据集包含 147,568 张 Analyzer v4 记录。谱面 `2571051`、`2573164`、`2628991` 在固定 rework 快照中单张计算超过 30 秒，因此未进入发布索引并保留在失败清单中。该数据集需要包含 Analyzer v4 runtime 的 OPP（`5c5d2cf` 或更新版本）。
 
@@ -83,10 +83,16 @@ cargo run -- ingest-packs .\data --cookie-file C:\secure\osu-cookies.txt --proxy
 
 ```powershell
 cargo run --release -- mania-reanalyze E:\osu-mania-ranked
+cargo run --release -- mania-mma-reanalyze E:\osu-mania-ranked --mods NM,DT,HT
 cargo run --release -- mania-normalizer-fit E:\osu-mania-ranked --version 1
 cargo run --release -- mania-index-build E:\osu-mania-ranked --version 1
 cargo run --release -- mania-doctor E:\osu-mania-ranked --version 1
 ```
+
+`mania-mma-reanalyze` 是可选的一步：它按 osumania_map_analyser 的规则为每个谱面生成
+NM/DT/HT 三份键型记录（主模式、六类覆盖率、细分键型、RC/LN 比例、强度与时间结构）。
+DT/HT 按实际倍率重新分析，不用 NoMod 特征估算。该命令需要先跑过 `mania-reanalyze`，
+因为记录挂在已分析的谱面校验值上。
 
 可按库内 BeatmapID 或任意本地 `.osu` 文件查询；结果默认排除同一 beatmapset：
 
