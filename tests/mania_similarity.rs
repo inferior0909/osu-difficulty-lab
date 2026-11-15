@@ -1,22 +1,26 @@
-use osu_difficulty_lab::{ManiaGameMod, analyze_mania_mma_record};
+use osu_difficulty_lab::{ManiaGameMod, analyze_key_pattern_record};
 
 #[test]
 fn distance_matches_v4_for_all_fixture_pairs() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mma");
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/key-pattern");
     let expected: serde_json::Value =
         serde_json::from_slice(&std::fs::read(root.join("distances.expected.json")).unwrap())
             .unwrap();
+    // The reference matrix holds NM, DT, HT of every chart in that order. Only the NM pairs still
+    // apply: DT/HT records changed in 1.0, while the distance formula itself did not.
     let mut records = Vec::new();
     for name in ["fixture-4k", "fixture-6k", "fixture-7k", "fixture-ln"] {
         let text = std::fs::read_to_string(root.join(format!("{name}.osu"))).unwrap();
-        for game_mod in ManiaGameMod::ALL {
-            records.push(analyze_mania_mma_record(&text, 1, 1, game_mod).unwrap());
-        }
+        let index = records.len() * ManiaGameMod::ALL.len();
+        records.push((
+            index,
+            analyze_key_pattern_record(&text, 1, 1, ManiaGameMod::Nm).unwrap(),
+        ));
     }
-    for (i, a) in records.iter().enumerate() {
-        for (j, b) in records.iter().enumerate() {
+    for (i, a) in &records {
+        for (j, b) in &records {
             let distance = mania_pattern::similarity::distance(a, b);
-            let reference = &expected[i][j];
+            let reference = &expected[*i][*j];
             for (name, value) in [
                 ("total", distance.total),
                 ("pattern", distance.pattern),
@@ -37,8 +41,9 @@ fn distance_matches_v4_for_all_fixture_pairs() {
             }
         }
     }
-    let mut sv = records[0].clone();
+    let no_mod = &records[0].1;
+    let mut sv = no_mod.clone();
     sv.sv_amount = 2000.0;
     assert_eq!(mania_pattern::similarity::display_category(&sv), "SV");
-    assert!((mania_pattern::similarity::distance(&sv, &records[0]).pattern - 0.05).abs() < 1e-9);
+    assert!((mania_pattern::similarity::distance(&sv, no_mod).pattern - 0.05).abs() < 1e-9);
 }

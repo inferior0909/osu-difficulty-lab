@@ -13,8 +13,8 @@ The implementation uses the general concepts of bounded per-row signals, burst/s
 
 ## Key-pattern analysis (`crates/mania-pattern`)
 
-`crates/mania-pattern` is a source port of the key-pattern analysis of **osumania_map_analyser**, commit `70e2bd92524e093ee94ca9cb6cc159ec223faa04`, by Leo_Black.
+`crates/mania-pattern` is a source port of the key-pattern analysis of **osumania_map_analyser**, commit `2fb795e5e205c50c7bcb35b370379922c830e72b`, by Leo_Black.
 
 - Ported sources: `js/parser/patternOsuParser.js`, `js/parser/noteColumn.js`, and `js/patterns/{chart,config,primitives,patternsDef,findPatterns,clustering,categorise,summary}.js`.
-- License: MIT, copyright (c) 2026 Leo_Black. The license text is kept at `licenses/osumania_map_analyser-LICENSE`, and the upstream copy is at <https://github.com/LeoBlackMT/osumania_map_analyser/blob/70e2bd92524e093ee94ca9cb6cc159ec223faa04/LICENSE>.
-- The port keeps the upstream constants, matching order, clamping and rounding so that records stay comparable with the reference implementation. `examples/mma_parity.rs` compares this port against the pinned JavaScript sources and is expected to report zero mismatches.
+- License: MIT, copyright (c) 2026 Leo_Black. The license text is kept at `licenses/osumania_map_analyser-LICENSE`, and the upstream copy is at <https://github.com/LeoBlackMT/osumania_map_analyser/blob/2fb795e5e205c50c7bcb35b370379922c830e72b/LICENSE>.
+- The port keeps the upstream constants, matching order, clamping and rounding so that records stay comparable with the reference implementation. `tests/mania_key_pattern.rs` compares this port against the output of the upstream JavaScript, stored in `tests/fixtures/key-pattern/expected.json`.

@@ -1,7 +1,7 @@
 //! Recommendation similarity metric shared by the dataset exporter and the client.
 //! It is not a mania_map_analyser difficulty rating.
 use crate::{
-    ManiaMmaRecord,
+    KeyPatternRecord,
     config::{CORE_PATTERN_LIST, SV_AMOUNT_THRESHOLD},
 };
 
@@ -41,11 +41,11 @@ fn rms(a: &[f32], b: &[f32]) -> f64 {
         .sqrt()
 }
 
-pub fn is_sv(record: &ManiaMmaRecord) -> bool {
+pub fn is_sv(record: &KeyPatternRecord) -> bool {
     record.sv_amount as f64 >= SV_AMOUNT_THRESHOLD
 }
 
-pub fn display_category(record: &ManiaMmaRecord) -> &str {
+pub fn display_category(record: &KeyPatternRecord) -> &str {
     if is_sv(record) {
         "SV"
     } else {
@@ -53,7 +53,7 @@ pub fn display_category(record: &ManiaMmaRecord) -> &str {
     }
 }
 
-pub fn distance(a: &ManiaMmaRecord, b: &ManiaMmaRecord) -> SimilarityDistance {
+pub fn distance(a: &KeyPatternRecord, b: &KeyPatternRecord) -> SimilarityDistance {
     let mut labels: Vec<&str> = a
         .subtypes
         .iter()
@@ -62,7 +62,7 @@ pub fn distance(a: &ManiaMmaRecord, b: &ManiaMmaRecord) -> SimilarityDistance {
         .collect();
     labels.sort_unstable();
     labels.dedup();
-    let values = |r: &ManiaMmaRecord| {
+    let values = |r: &KeyPatternRecord| {
         labels
             .iter()
             .map(|name| {
@@ -74,7 +74,7 @@ pub fn distance(a: &ManiaMmaRecord, b: &ManiaMmaRecord) -> SimilarityDistance {
             .collect::<Vec<_>>()
     };
     let subtype = distribution(&values(a), &values(b));
-    let amount = |r: &ManiaMmaRecord| {
+    let amount = |r: &KeyPatternRecord| {
         CORE_PATTERN_LIST.map(|name| {
             r.bars
                 .iter()
@@ -83,7 +83,7 @@ pub fn distance(a: &ManiaMmaRecord, b: &ManiaMmaRecord) -> SimilarityDistance {
                 .sum::<f64>()
         })
     };
-    let bpm = |r: &ManiaMmaRecord, name: &str| {
+    let bpm = |r: &KeyPatternRecord, name: &str| {
         let mut weight = 0.0;
         let mut sum = 0.0;
         for c in &r.clusters {

@@ -1,7 +1,7 @@
 //! Fixed parameters of the pattern analysis.
 //!
-//! These values must stay in sync with mania_map_analyser. Changing them makes stored records incomparable, so bump
-//! [`MANIA_MMA_ALGORITHM_VERSION`](crate::MANIA_MMA_ALGORITHM_VERSION) as well.
+//! These values must stay in sync with osumania_map_analyser v3.0.0. Changing them makes stored records incomparable, so
+//! change [`KEY_PATTERN_RULESET`](crate::KEY_PATTERN_RULESET) as well.
 
 pub fn core_rating_multiplier(pattern: &str) -> f64 {
     match pattern {
@@ -97,7 +97,6 @@ pub const SV_EXTREME_BPM_MAX: f64 = 450.0;
 pub const SV_EXTREME_BPM_RATIO: f64 = 4.0;
 pub const LONGJACK_VIBRO_RATIO_THRESHOLD: f64 = 0.6;
 pub const LONGJACK_VIBRO_MIN_BPM: i64 = 180;
-pub const CLUSTER_SPECIFIC_NAME_MIN_RATIO: f64 = 0.0;
 pub const ENABLE_MULTI_LABEL_SAME_WINDOW: bool = true;
 pub const COORDINATION_SPECIFIC_ORDER: [&str; 3] = ["Column Lock", "Shield", "Release"];
 pub const DENSITY_SPECIFIC_ORDER: [&str; 6] = [

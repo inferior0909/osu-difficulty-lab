@@ -6,7 +6,7 @@
 use super::chart::{Chart, NoteType};
 use super::config::CORE_PATTERN_LIST;
 use super::patterns::FoundPattern;
-use super::summary::MmaReport;
+use super::summary::KeyPatternReport;
 
 pub const WINDOW_MS: f64 = 4000.0;
 
@@ -21,7 +21,7 @@ pub struct PatternBar {
 }
 
 #[derive(Debug, Clone)]
-pub struct MmaFeatures {
+pub struct KeyPatternFeatures {
     pub coverage: [f64; 6],
     pub subtypes: Vec<(String, f64)>,
     pub bars: Vec<PatternBar>,
@@ -63,7 +63,7 @@ fn union_length(mut spans: Vec<(f64, f64)>) -> f64 {
     total
 }
 
-fn display_bars(report: &MmaReport) -> Vec<PatternBar> {
+fn display_bars(report: &KeyPatternReport) -> Vec<PatternBar> {
     let mut order: Vec<&'static str> = Vec::new();
     let mut amounts: Vec<f64> = Vec::new();
     let mut bpms: Vec<f64> = Vec::new();
@@ -122,7 +122,7 @@ fn display_bars(report: &MmaReport) -> Vec<PatternBar> {
         .collect()
 }
 
-pub fn derive(chart: &Chart, report: &MmaReport) -> MmaFeatures {
+pub fn derive(chart: &Chart, report: &KeyPatternReport) -> KeyPatternFeatures {
     let mut heads: Vec<(f64, usize)> = Vec::new();
     for row in &chart.notes {
         let notes = row
@@ -278,7 +278,7 @@ pub fn derive(chart: &Chart, report: &MmaReport) -> MmaFeatures {
                 .collect(),
         ) / duration;
 
-    MmaFeatures {
+    KeyPatternFeatures {
         coverage,
         subtypes,
         bars: display_bars(report),

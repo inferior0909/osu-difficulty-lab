@@ -28,9 +28,10 @@ pub use mania_index::{ManiaSimilarityStore, build_mania_index, validate_mania_in
 pub use mania_mod_export::{ManiaModFeatureRecord, export_mania_mod_features};
 pub use mania_normalizer::{ManiaNormalizer, fit_mania_normalizer, overall_intensity};
 pub use mania_pattern::{
-    MANIA_MMA_ALGORITHM_ID, MANIA_MMA_ALGORITHM_VERSION, MANIA_MMA_SNAPSHOT, ManiaGameMod,
-    ManiaMmaAnalysis, ManiaMmaBar, ManiaMmaCluster, ManiaMmaRecord, MmaFeatures, MmaReport,
-    PatternCluster, analyze as analyze_mania_mma, analyze_record as analyze_mania_mma_record,
+    KEY_PATTERN_RECORD_FORMAT, KEY_PATTERN_REFERENCE, KEY_PATTERN_RULESET, KeyPatternAnalysis,
+    KeyPatternBar, KeyPatternCluster, KeyPatternFeatures, KeyPatternRecord, KeyPatternReport,
+    ManiaGameMod, PatternCluster, analyze as analyze_key_pattern,
+    analyze_record as analyze_key_pattern_record,
 };
 pub use mania_storage::ManiaFeatureStore;
 pub use mania_types::*;
@@ -51,5 +52,5 @@ pub const RAW_FEATURE_FILE: &str = "raw-features.bin";
 pub const MANIA_ANALYZER_VERSION: u32 = 1;
 pub const MANIA_ANALYZER_ALGORITHM_ID: &str = "mania-roxy-interlude-similarity-v1";
 pub const MANIA_RAW_FEATURE_FILE: &str = "mania-raw-features.bin";
-/// Versioned key-pattern records from the osumania_map_analyser port, one per beatmap and clock rate.
-pub const MANIA_MMA_FEATURE_FILE: &str = "mania-mma-features.bin";
+/// Key-pattern records, one per beatmap and clock rate. The file name is locked: released OPP looks it up.
+pub const KEY_PATTERN_FEATURE_FILE: &str = "mania-mma-features.bin";

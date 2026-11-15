@@ -16,7 +16,7 @@
 - SQLite 会保存 `Apeuriox/rosu-pp` 的 `pp-rework-202607` 固定快照（`9a073d29`）计算的 NoMod 星数和 0.1★ 分桶；每个桶同时记录五维归一化特征及原始 AR、CS、OD 的分布统计，供 OPP 动态推荐使用。
 - 数据和索引不提交到 Git；需要分发时请使用 Release 附件。
 
-mania 管线只接受 NoMod 4K/6K/7K，使用项目内置的纯 Rust 结构应变与键型分析，不调用 osu! 官方难度、Roxy 最终段位模型或 MinaCalc，也不会修改 standard 数据文件。原有 24 维特征仍是 NoMod；键型记录按固定版本 osumania_map_analyser 的规则逐条移植为 Rust（见 `crates/mania-pattern`），并对 NM/DT/HT 分别分析。
+mania 管线只接受 NoMod 4K/6K/7K，使用项目内置的纯 Rust 结构应变与键型分析，不调用 osu! 官方难度、Roxy 最终段位模型或 MinaCalc，也不会修改 standard 数据文件。原有 24 维特征仍是 NoMod；键型规则逐条移植自 osumania_map_analyser v3.0.0（见 `crates/mania-pattern`），DT/HT 沿用原速识别结果、按倍速换算 BPM 和时长。
 
 `v0.3.0` 数据集包含 147,568 张 Analyzer v4 记录。谱面 `2571051`、`2573164`、`2628991` 在固定 rework 快照中单张计算超过 30 秒，因此未进入发布索引并保留在失败清单中。该数据集需要包含 Analyzer v4 runtime 的 OPP（`5c5d2cf` 或更新版本）。
 
@@ -67,32 +67,22 @@ cargo run -- ingest-packs .\data --cookie-file C:\secure\osu-cookies.txt --proxy
 - [实现说明](docs/implementation.md)：数据流程、特征算法、存储格式、索引、导入与恢复机制。
 - [命令说明](docs/implementation.md#命令行)：所有 CLI 命令及其用途。
 
-## osu!mania Ranked 原始谱面
+## osu!mania 分析与相似检索
 
-`scripts/download-ranked-mania.ps1` 是与 standard 分析数据完全隔离的原始语料下载脚本：它通过 osu! OAuth API 枚举所有包含 mania 难度的 Ranked 谱面集，再筛选每个谱面集中实际 `ranked` 的 mania 难度，逐张下载 `.osu` 文件（因此不会漏掉 mixed set）。需要安装 `sqlite3`、在 osu! 账号页创建 OAuth 应用，以及导出已登录浏览器的 Netscape Cookie：
-
-```powershell
-.\scripts\download-ranked-mania.ps1 -ClientId <client-id> -ClientSecret <client-secret> -CookieFile C:\secure\osu-cookies.txt
-```
-
-首次可用 `-InitializeOnly` 只创建 `E:\osu-mania-ranked\mania-ranked.sqlite` 和 `mania_ranked_beatmaps` 表。完整运行会保存可续跑的目录、catalogue、CSV manifest 及失败清单；不要把它们放进 standard 的 `E:\osudata`。
-
-### mania 分析与相似检索
-
-下载完成后，在同一个语料目录生成独立的 mania 特征、分位归一化和 bucket 索引：
+mania 数据与 standard 分析数据完全隔离。把谱面放进数据目录的 `beatmaps\<BeatmapID>.osu` 后，在该目录生成独立的 mania 特征、分位归一化和 bucket 索引：
 
 ```powershell
 cargo run --release -- mania-reanalyze E:\osu-mania-ranked
-cargo run --release -- mania-mma-reanalyze E:\osu-mania-ranked --mods NM,DT,HT
+cargo run --release -- mania-pattern-analyze E:\osu-mania-ranked --mods NM,DT,HT
 cargo run --release -- mania-normalizer-fit E:\osu-mania-ranked --version 1
 cargo run --release -- mania-index-build E:\osu-mania-ranked --version 1
 cargo run --release -- mania-doctor E:\osu-mania-ranked --version 1
 ```
 
-`mania-mma-reanalyze` 是可选的一步：它按 osumania_map_analyser 的规则为每个谱面生成
+`mania-pattern-analyze` 是可选的一步：它按 osumania_map_analyser v3.0.0 的规则为每个谱面生成
 NM/DT/HT 三份键型记录（主模式、六类覆盖率、细分键型、RC/LN 比例、强度与时间结构）。
-DT/HT 按实际倍率重新分析，不用 NoMod 特征估算。该命令需要先跑过 `mania-reanalyze`，
-因为记录挂在已分析的谱面校验值上。
+键型只在原速谱面上识别，DT/HT 沿用原速结果、按倍速换算 BPM 和时长。该命令需要先跑过
+`mania-reanalyze`，因为记录挂在已分析的谱面校验值上。
 
 可按库内 BeatmapID 或任意本地 `.osu` 文件查询；结果默认排除同一 beatmapset：
 

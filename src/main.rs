@@ -17,7 +17,7 @@ use osu_difficulty_lab::{
     ManiaAnalyzer, ManiaBeatmapMetadata, ManiaFeatureStore, ManiaGameMod, ManiaNormalizer,
     ManiaRawFeatureRecord, ManiaSimilarityQuery, ManiaSimilarityStore, PackDownloadEvent,
     PackDownloadReport, PackDownloadSource, PackImporter, RawFeatureRecord, SimilarityQuery,
-    SimilarityStore, analyze_mania_mma, build_main_index, build_mania_index, export_mania_csv,
+    SimilarityStore, analyze_key_pattern, build_main_index, build_mania_index, export_mania_csv,
     export_mania_parquet, fit_mania_normalizer, fit_normalizer, validate_mania_index_coverage,
 };
 use sha2::{Digest, Sha256};
@@ -248,7 +248,7 @@ enum Command {
     ///
     /// Requires `mania-reanalyze` to have run first, because records are attached to the
     /// stored beatmap checksum.
-    ManiaMmaReanalyze {
+    ManiaPatternAnalyze {
         data_dir: PathBuf,
         /// Comma separated clock rates.
         #[arg(long, default_value = "NM,DT,HT")]
@@ -705,8 +705,8 @@ fn main() -> Result<()> {
         Command::ManiaReanalyze { data_dir, threads } => {
             run_mania_reanalysis(&data_dir, threads)?;
         }
-        Command::ManiaMmaReanalyze { data_dir, mods } => {
-            run_mania_mma_reanalysis(&data_dir, &mods)?;
+        Command::ManiaPatternAnalyze { data_dir, mods } => {
+            run_key_pattern_analysis(&data_dir, &mods)?;
         }
         Command::ManiaNormalizerFit { data_dir, version } => {
             let mut store = ManiaFeatureStore::open(data_dir)?;
@@ -824,18 +824,18 @@ fn main() -> Result<()> {
                 band_counts[record.difficulty_band as usize] += 1;
                 family_counts[record.mode_family as usize] += 1;
             }
-            let mma_counts: Vec<usize> = [ManiaGameMod::Nm, ManiaGameMod::Dt, ManiaGameMod::Ht]
+            let pattern_counts: Vec<usize> = ManiaGameMod::ALL
                 .into_iter()
-                .map(|game_mod| store.mma_record_count_for(game_mod))
+                .map(|game_mod| store.key_pattern_count_for(game_mod))
                 .collect::<Result<Vec<_>>>()?;
-            let mma_total: usize = mma_counts.iter().sum();
-            if mma_total > count.saturating_mul(3) {
+            let pattern_total: usize = pattern_counts.iter().sum();
+            if pattern_total > count.saturating_mul(3) {
                 anyhow::bail!(
-                    "mania key-pattern store has {mma_total} records for {count} beatmaps"
+                    "mania key-pattern store has {pattern_total} records for {count} beatmaps"
                 );
             }
             println!(
-                "healthy: normalized={count} eligible={eligible} unsupported={unsupported} failed={failed} keys=4K:{},6K:{},7K:{} families=RC:{},HB:{},Mix:{},LN:{} bands={band_counts:?} mma=NM:{},DT:{},HT:{}",
+                "healthy: normalized={count} eligible={eligible} unsupported={unsupported} failed={failed} keys=4K:{},6K:{},7K:{} families=RC:{},HB:{},Mix:{},LN:{} bands={band_counts:?} key_patterns=NM:{},DT:{},HT:{}",
                 key_counts[0],
                 key_counts[1],
                 key_counts[2],
@@ -843,16 +843,16 @@ fn main() -> Result<()> {
                 family_counts[1],
                 family_counts[2],
                 family_counts[3],
-                mma_counts[0],
-                mma_counts[1],
-                mma_counts[2],
+                pattern_counts[0],
+                pattern_counts[1],
+                pattern_counts[2],
             );
         }
     };
     Ok(())
 }
 
-fn run_mania_mma_reanalysis(data_dir: &PathBuf, mods: &str) -> Result<()> {
+fn run_key_pattern_analysis(data_dir: &PathBuf, mods: &str) -> Result<()> {
     let mut rates: Vec<ManiaGameMod> = Vec::new();
     for code in mods.split(',') {
         let code = code.trim();
@@ -898,6 +898,13 @@ fn run_mania_mma_reanalysis(data_dir: &PathBuf, mods: &str) -> Result<()> {
     if paths.is_empty() {
         anyhow::bail!("no .osu files found in {}", beatmap_dir.display());
     }
+    // Only retire old records once there are charts to analyse them again from.
+    if store.prepare_key_pattern_analysis()? {
+        println!(
+            "key-pattern rules changed to {}; all records will be analysed again",
+            osu_difficulty_lab::KEY_PATTERN_RULESET
+        );
+    }
 
     let mut inserted = 0_usize;
     let mut skipped = 0_usize;
@@ -929,15 +936,15 @@ fn run_mania_mma_reanalysis(data_dir: &PathBuf, mods: &str) -> Result<()> {
         }
 
         for game_mod in &rates {
-            if store.current_mma_matches(beatmap_id, &metadata.checksum, *game_mod)? {
+            if store.current_key_pattern_matches(beatmap_id, &metadata.checksum, *game_mod)? {
                 skipped += 1;
                 continue;
             }
-            match analyze_mania_mma(&text, *game_mod) {
+            match analyze_key_pattern(&text, *game_mod) {
                 Ok(analysis) => {
                     let record =
                         analysis.into_record(beatmap_id, metadata.beatmapset_id, *game_mod);
-                    match store.append_mma(&metadata.checksum, &record) {
+                    match store.append_key_pattern(&metadata.checksum, &record) {
                         Ok(true) => inserted += 1,
                         Ok(false) => skipped += 1,
                         Err(error) => failures.push(format!(
@@ -956,7 +963,7 @@ fn run_mania_mma_reanalysis(data_dir: &PathBuf, mods: &str) -> Result<()> {
         }
     }
 
-    let failure_path = data_dir.join("mania-mma-reanalyze-failures.txt");
+    let failure_path = data_dir.join("mania-pattern-analyze-failures.txt");
     if failures.is_empty() {
         let _ = fs::remove_file(&failure_path);
     } else {

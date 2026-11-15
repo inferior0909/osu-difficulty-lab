@@ -42,7 +42,7 @@ fn resolve_mode_tag(ln_ratio: f64, hb_ratio: f64) -> &'static str {
 }
 
 #[derive(Debug, Clone)]
-pub struct MmaReport {
+pub struct KeyPatternReport {
     pub clusters: Vec<PatternCluster>,
     /// Filtered matches before clustering; the derived features reuse these intervals instead of matching again.
     pub patterns: Vec<FoundPattern>,
@@ -54,7 +54,29 @@ pub struct MmaReport {
     pub duration: f64,
 }
 
-impl MmaReport {
+impl KeyPatternReport {
+    /// Converts an original-speed report to clock rate `rate` (DT 1.5, HT 0.75) without finding
+    /// patterns again: times ÷ rate, cluster BPM × rate (rounded), importance recomputed.
+    ///
+    /// Example under DT: a 180 BPM cluster lasting 2583 ms becomes 270 BPM lasting 1722 ms.
+    ///
+    /// Kept as NM: mode tag, category, ratios, SV amount (so the "SV" label never depends on the
+    /// mod) and cluster order (re-sorting on rounded BPM could swap two near-equal clusters).
+    pub fn at_rate(mut self, rate: f64) -> Self {
+        for pattern in &mut self.patterns {
+            pattern.start /= rate;
+            pattern.end /= rate;
+            pattern.ms_per_beat /= rate;
+        }
+        for cluster in &mut self.clusters {
+            cluster.bpm = (cluster.bpm as f64 * rate).round() as i64;
+            cluster.amount /= rate;
+            cluster.importance = cluster.amount * cluster.rating_multiplier * cluster.bpm as f64;
+        }
+        self.duration /= rate;
+        self
+    }
+
     pub fn important_clusters(&self) -> Vec<&PatternCluster> {
         let Some(first) = self.clusters.first() else {
             return Vec::new();
@@ -71,7 +93,7 @@ impl MmaReport {
     }
 }
 
-pub fn from_chart(chart: &Chart) -> MmaReport {
+pub fn from_chart(chart: &Chart) -> KeyPatternReport {
     let ln_ratio = ln_percent(chart);
     let hb_ratio = hb_row_ratio(chart);
     let mode_tag = resolve_mode_tag(ln_ratio, hb_ratio);
@@ -128,7 +150,7 @@ pub fn from_chart(chart: &Chart) -> MmaReport {
     let sv_amount = sv_time(chart);
     let category = categorise_chart(&pruned);
 
-    MmaReport {
+    KeyPatternReport {
         clusters: pruned,
         patterns,
         category,

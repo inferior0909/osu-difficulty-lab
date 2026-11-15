@@ -10,6 +10,14 @@ enum HitObject {
     Hold { x: f64, time: f64, end_time: f64 },
 }
 
+impl HitObject {
+    fn time(&self) -> f64 {
+        match *self {
+            Self::Circle { time, .. } | Self::Hold { time, .. } => time,
+        }
+    }
+}
+
 enum TimingPoint {
     Uninherited {
         time: f64,
@@ -138,6 +146,9 @@ fn parse_hit_objects(lines: &[String]) -> Vec<HitObject> {
             out.push(HitObject::Circle { x, time });
         }
     }
+    // Same as v3.0.0: [HitObjects] is not always in time order (some converters shuffle it), but
+    // convert_hit_objects needs ascending times. Stable, so equal times keep their file order.
+    out.sort_by(|a, b| a.time().total_cmp(&b.time()));
     out
 }
 

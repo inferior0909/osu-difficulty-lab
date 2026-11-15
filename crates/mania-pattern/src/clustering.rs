@@ -3,9 +3,7 @@
 //! Clustering merges per-window matches into clusters keyed by pattern, mixed flag and BPM,
 //! then derives Amount (union length of the intervals) and Importance (Amount x multiplier x BPM).
 
-use super::config::{
-    BPM_CLUSTER_THRESHOLD, CLUSTER_SPECIFIC_NAME_MIN_RATIO, RELEASE_WITH_DW_MULTIPLIER,
-};
+use super::config::{BPM_CLUSTER_THRESHOLD, RELEASE_WITH_DW_MULTIPLIER};
 use super::patterns::{
     CORE_DENSITY_NAME, CORE_WILDCARD_NAME, FoundPattern, resolve_rating_multiplier,
 };
@@ -16,25 +14,11 @@ pub struct PatternCluster {
     /// Specific types with their shares, sorted by share descending.
     pub specific_types: Vec<(String, f64)>,
     pub rating_multiplier: f64,
+    /// At the report's clock rate (already scaled for DT/HT).
     pub bpm: i64,
     pub mixed: bool,
     pub amount: f64,
     pub importance: f64,
-}
-
-impl PatternCluster {
-    pub fn format(&self, rate: f64) -> String {
-        let name = match self.specific_types.first() {
-            Some((name, ratio)) if *ratio >= CLUSTER_SPECIFIC_NAME_MIN_RATIO => name.as_str(),
-            _ => self.pattern,
-        };
-        let bpm = (self.bpm as f64 * rate).round() as i64;
-        if self.mixed {
-            format!("~{bpm}BPM Mixed {name}")
-        } else {
-            format!("{bpm}BPM {name}")
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy)]

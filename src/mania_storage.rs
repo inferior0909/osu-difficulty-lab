@@ -8,14 +8,16 @@ use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::{
-    MANIA_ANALYZER_ALGORITHM_ID, MANIA_ANALYZER_VERSION, MANIA_MMA_ALGORITHM_VERSION,
-    MANIA_MMA_FEATURE_FILE, MANIA_RAW_FEATURE_FILE, ManiaBeatmapMetadata, ManiaFeatureRecord,
-    ManiaGameMod, ManiaMmaRecord, ManiaModeFamily, ManiaPattern, ManiaRawFeatureRecord,
+    KEY_PATTERN_FEATURE_FILE, KEY_PATTERN_RECORD_FORMAT, KEY_PATTERN_RULESET, KeyPatternRecord,
+    MANIA_ANALYZER_ALGORITHM_ID, MANIA_ANALYZER_VERSION, MANIA_RAW_FEATURE_FILE,
+    ManiaBeatmapMetadata, ManiaFeatureRecord, ManiaGameMod, ManiaModeFamily, ManiaPattern,
+    ManiaRawFeatureRecord,
 };
 
 const RAW_HEADER: &[u8; 8] = b"ODLMAR1\0";
 const NORMALIZED_HEADER: &[u8; 8] = b"ODLMAN1\0";
-const MMA_HEADER: &[u8; 8] = b"ODLMMA1\0";
+/// Locked: released OPP checks this header.
+const KEY_PATTERN_HEADER: &[u8; 8] = b"ODLMMA1\0";
 
 pub struct ManiaFeatureStore {
     root: PathBuf,
@@ -64,6 +66,8 @@ impl ManiaFeatureStore {
                key TEXT PRIMARY KEY,
                value TEXT NOT NULL
              );
+             -- Key-pattern records. Table and column names are locked: released OPP checks them
+             -- column by column (mma_version holds the record format, always 2).
              CREATE TABLE IF NOT EXISTS mania_mma_analyses (
                beatmap_id INTEGER NOT NULL,
                game_mod TEXT NOT NULL,
@@ -83,7 +87,7 @@ impl ManiaFeatureStore {
             indexes_invalidated: false,
         };
         store.ensure_header(MANIA_RAW_FEATURE_FILE, RAW_HEADER)?;
-        store.ensure_header(MANIA_MMA_FEATURE_FILE, MMA_HEADER)?;
+        store.ensure_header(KEY_PATTERN_FEATURE_FILE, KEY_PATTERN_HEADER)?;
         Ok(store)
     }
 
@@ -178,8 +182,22 @@ impl ManiaFeatureStore {
         Ok(true)
     }
 
+    /// Stored rows only carry the record format, which stays 2 when rules change, so the rule set
+    /// is kept in `mania_state`. When it differs, every row is retired and gets analysed again.
+    /// Returns whether rows were retired.
+    pub fn prepare_key_pattern_analysis(&self) -> Result<bool> {
+        if self.state("key_pattern_ruleset")?.as_deref() == Some(KEY_PATTERN_RULESET) {
+            return Ok(false);
+        }
+        let retired = self
+            .connection
+            .execute("UPDATE mania_mma_analyses SET status=0 WHERE status=1", [])?;
+        self.set_state("key_pattern_ruleset", KEY_PATTERN_RULESET)?;
+        Ok(retired > 0)
+    }
+
     /// Key-pattern records are stored per beatmap and clock rate, so one beatmap has NM/DT/HT rows.
-    pub fn current_mma_matches(
+    pub fn current_key_pattern_matches(
         &self,
         beatmap_id: u64,
         checksum: &str,
@@ -191,19 +209,23 @@ impl ManiaFeatureStore {
             params![
                 beatmap_id as i64,
                 game_mod.as_str(),
-                MANIA_MMA_ALGORITHM_VERSION as i64,
+                KEY_PATTERN_RECORD_FORMAT as i64,
                 checksum,
             ],
             |row| row.get(0),
         )?)
     }
 
-    pub fn append_mma(&mut self, checksum: &str, record: &ManiaMmaRecord) -> Result<bool> {
+    pub fn append_key_pattern(
+        &mut self,
+        checksum: &str,
+        record: &KeyPatternRecord,
+    ) -> Result<bool> {
         mania_pattern::validate_record(record)?;
-        if self.current_mma_matches(record.beatmap_id, checksum, record.game_mod)? {
+        if self.current_key_pattern_matches(record.beatmap_id, checksum, record.game_mod)? {
             return Ok(false);
         }
-        let offset = self.append_record(MANIA_MMA_FEATURE_FILE, MMA_HEADER, record)?;
+        let offset = self.append_record(KEY_PATTERN_FEATURE_FILE, KEY_PATTERN_HEADER, record)?;
         let transaction = self.connection.transaction()?;
         transaction.execute(
             "INSERT INTO mania_mma_analyses(
@@ -223,22 +245,26 @@ impl ManiaFeatureStore {
         Ok(true)
     }
 
-    pub fn mma_records(&self) -> Result<Vec<ManiaMmaRecord>> {
+    pub fn key_pattern_records(&self) -> Result<Vec<KeyPatternRecord>> {
         // Only return records whose checksum still matches the current beatmap, so a replaced file cannot read old patterns.
         let offsets = self.offsets(
             "SELECT a.mma_offset FROM mania_mma_analyses a
              JOIN mania_beatmaps b ON b.beatmap_id = a.beatmap_id
              WHERE a.mma_version=?1 AND a.status=1 AND a.checksum = b.checksum
              ORDER BY a.beatmap_id, a.game_mod",
-            &[MANIA_MMA_ALGORITHM_VERSION as i64],
+            &[KEY_PATTERN_RECORD_FORMAT as i64],
         )?;
         offsets
             .into_iter()
-            .map(|offset| self.read_record(MANIA_MMA_FEATURE_FILE, MMA_HEADER, offset))
+            .map(|offset| self.read_record(KEY_PATTERN_FEATURE_FILE, KEY_PATTERN_HEADER, offset))
             .collect()
     }
 
-    pub fn mma_for_id(&self, beatmap_id: u64, game_mod: ManiaGameMod) -> Result<ManiaMmaRecord> {
+    pub fn key_pattern_for_id(
+        &self,
+        beatmap_id: u64,
+        game_mod: ManiaGameMod,
+    ) -> Result<KeyPatternRecord> {
         let offset: Option<u64> = self
             .connection
             .query_row(
@@ -249,7 +275,7 @@ impl ManiaFeatureStore {
                 params![
                     beatmap_id as i64,
                     game_mod.as_str(),
-                    MANIA_MMA_ALGORITHM_VERSION as i64,
+                    KEY_PATTERN_RECORD_FORMAT as i64,
                 ],
                 |row| row.get(0),
             )
@@ -260,23 +286,23 @@ impl ManiaFeatureStore {
                 game_mod.as_str()
             )
         })?;
-        self.read_record(MANIA_MMA_FEATURE_FILE, MMA_HEADER, offset)
+        self.read_record(KEY_PATTERN_FEATURE_FILE, KEY_PATTERN_HEADER, offset)
     }
 
-    pub fn mma_record_count(&self) -> Result<usize> {
+    pub fn key_pattern_count(&self) -> Result<usize> {
         Ok(self.connection.query_row(
             "SELECT COUNT(*) FROM mania_mma_analyses a JOIN mania_beatmaps b ON a.beatmap_id=b.beatmap_id
              WHERE a.mma_version=?1 AND a.status=1 AND a.checksum=b.checksum",
-            params![MANIA_MMA_ALGORITHM_VERSION as i64],
+            params![KEY_PATTERN_RECORD_FORMAT as i64],
             |row| row.get::<_, i64>(0),
         )? as usize)
     }
 
-    pub fn mma_record_count_for(&self, game_mod: ManiaGameMod) -> Result<usize> {
+    pub fn key_pattern_count_for(&self, game_mod: ManiaGameMod) -> Result<usize> {
         Ok(self.connection.query_row(
             "SELECT COUNT(*) FROM mania_mma_analyses a JOIN mania_beatmaps b ON a.beatmap_id=b.beatmap_id
              WHERE a.mma_version=?1 AND a.game_mod=?2 AND a.status=1 AND a.checksum=b.checksum",
-            params![MANIA_MMA_ALGORITHM_VERSION as i64, game_mod.as_str()],
+            params![KEY_PATTERN_RECORD_FORMAT as i64, game_mod.as_str()],
             |row| row.get::<_, i64>(0),
         )? as usize)
     }

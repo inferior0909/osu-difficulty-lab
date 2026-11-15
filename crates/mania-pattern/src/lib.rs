@@ -1,8 +1,8 @@
-//! Mania key-pattern analysis, ported from osumania_map_analyser.
+//! osu!mania key-pattern analysis, ported from osumania_map_analyser v3.0.0.
 //!
 //! Module layout mirrors the original files:
 //!
-//! | mania_map_analyser | here |
+//! | osumania_map_analyser | here |
 //! | --- | --- |
 //! | `js/parser/patternOsuParser.js` | [`parser`] |
 //! | `js/patterns/primitives.js` | [`primitives`] |
@@ -28,26 +28,41 @@ use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 
 pub use clustering::{PatternCluster, specific_clusters};
-pub use features::MmaFeatures;
+pub use features::KeyPatternFeatures;
 pub use rate::ManiaGameMod;
-pub use summary::MmaReport;
+pub use summary::KeyPatternReport;
 
-/// Pinned mania_map_analyser revision, recorded as the data source.
-pub const MANIA_MMA_SNAPSHOT: &str =
-    "osumania_map_analyser@70e2bd92524e093ee94ca9cb6cc159ec223faa04";
+/// The analyser version these rules are copied from.
+pub const KEY_PATTERN_REFERENCE: &str =
+    "osumania_map_analyser v3.0.0 (2fb795e5e205c50c7bcb35b370379922c830e72b)";
 
-/// Algorithm identifier; bump whenever rules, parameters or derived features change.
-pub const MANIA_MMA_ALGORITHM_ID: &str = "mania-mma-pattern-v2";
+/// Name of the rule set. Change it whenever rules, parameters or derived features change.
+pub const KEY_PATTERN_RULESET: &str = "mania-key-pattern-1.0";
+
+/// Byte layout of [`KeyPatternRecord`]. Locked at 2: released OPP only reads records with this value.
+/// New fields go at the end of the record under the same number (released OPP ignores trailing bytes);
+/// only changing or removing an existing field needs a new number.
+pub const KEY_PATTERN_RECORD_FORMAT: u32 = 2;
+
+// Old names, kept so OPP 0.5.0+ can move to this version without renaming anything.
+pub type ManiaMmaRecord = KeyPatternRecord;
+pub type ManiaMmaCluster = KeyPatternCluster;
+pub type ManiaMmaBar = KeyPatternBar;
+pub const MANIA_MMA_ALGORITHM_VERSION: u32 = KEY_PATTERN_RECORD_FORMAT;
 
 #[derive(Debug, Clone)]
-pub struct ManiaMmaAnalysis {
+pub struct KeyPatternAnalysis {
     pub key_count: u8,
-    pub report: MmaReport,
-    pub features: MmaFeatures,
+    pub report: KeyPatternReport,
+    pub features: KeyPatternFeatures,
 }
 
-/// `game_mod` selects the clock rate: DT/HT rescale the chart before analysis instead of scaling NoMod features.
-pub fn analyze(text: &str, game_mod: ManiaGameMod) -> Result<ManiaMmaAnalysis> {
+/// Analyses one chart at the clock rate of `game_mod`.
+///
+/// As in osumania_map_analyser v3.0.0, patterns are always found at the original speed; DT/HT only
+/// rescale times and BPM ([`KeyPatternReport::at_rate`]), so mode tag, category and cluster names
+/// equal NM. Note density and time structure are measured on the chart stretched to DT/HT timing.
+pub fn analyze(text: &str, game_mod: ManiaGameMod) -> Result<KeyPatternAnalysis> {
     let meta = lightweight_metadata(text);
     if meta.mode != Some(3) {
         bail!("only osu!mania mode is supported");
@@ -59,20 +74,22 @@ pub fn analyze(text: &str, game_mod: ManiaGameMod) -> Result<ManiaMmaAnalysis> {
         bail!("only 4K, 6K, and 7K are supported (found {key_count}K)");
     }
 
-    let transformed = rate::transform_rate(text, game_mod.rate())?;
-    let chart = parser::parse_osu_mania(&transformed)?;
+    let chart = parser::parse_osu_mania(text)?;
+    // The parser truncates CircleSize while the check above rounds it, so 3.6 would pass as 4K.
     if chart.keys != key_count as usize {
-        bail!(
-            "key count changed while transforming: {} -> {}",
-            key_count,
-            chart.keys
-        );
+        bail!("CircleSize is not a whole key count");
     }
 
-    let report = summary::from_chart(&chart);
-    let features = features::derive(&chart, &report);
+    let rate = game_mod.rate();
+    let report = summary::from_chart(&chart).at_rate(rate);
+    let timed_chart = if game_mod == ManiaGameMod::Nm {
+        chart
+    } else {
+        parser::parse_osu_mania(&rate::transform_rate(text, rate)?)?
+    };
+    let features = features::derive(&timed_chart, &report);
 
-    Ok(ManiaMmaAnalysis {
+    Ok(KeyPatternAnalysis {
         key_count,
         report,
         features,
@@ -115,9 +132,12 @@ fn lightweight_metadata(text: &str) -> LightMetadata {
     out
 }
 
-/// Persistable key-pattern record used by dataset files and consumers.
+/// Persisted key-pattern record, one per beatmap and clock rate.
+///
+/// Field order is the binary format read by OPP (bincode, fixed-width little endian): never reorder
+/// or remove fields, add new ones only at the end. Names are not stored, but OPP code uses them.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ManiaMmaRecord {
+pub struct KeyPatternRecord {
     pub beatmap_id: u64,
     pub beatmapset_id: u64,
     pub game_mod: ManiaGameMod,
@@ -130,12 +150,13 @@ pub struct ManiaMmaRecord {
     pub dominant_pattern: String,
     pub ln_note_ratio: f32,
     pub hb_row_ratio: f32,
+    /// Milliseconds of scroll-speed changes, always measured at the original speed.
     pub sv_amount: f32,
     pub duration_seconds: f32,
     /// Coverage of the six categories, ordered Stream, Chordstream, Jacks, Coordination, Density, Wildcard.
     pub coverage: [f32; 6],
-    pub clusters: Vec<ManiaMmaCluster>,
-    pub bars: Vec<ManiaMmaBar>,
+    pub clusters: Vec<KeyPatternCluster>,
+    pub bars: Vec<KeyPatternBar>,
     pub subtypes: Vec<(String, f32)>,
     /// Average, peak (95th percentile) and sustained (median) NPS, plus the longest sustained run in seconds.
     pub intensity: [f32; 4],
@@ -150,14 +171,16 @@ pub struct ManiaMmaRecord {
     pub chord_rate: f32,
     pub large_chord_rate: f32,
     pub unclassified: f32,
+    /// Always [`KEY_PATTERN_RECORD_FORMAT`].
     pub algorithm_version: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ManiaMmaCluster {
+pub struct KeyPatternCluster {
     pub pattern: String,
     pub specific_types: Vec<(String, f32)>,
     pub rating_multiplier: f32,
+    /// BPM at this record's clock rate.
     pub bpm: i32,
     pub mixed: bool,
     pub amount: f32,
@@ -165,7 +188,7 @@ pub struct ManiaMmaCluster {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ManiaMmaBar {
+pub struct KeyPatternBar {
     pub pattern: String,
     pub amount: f32,
     pub bpm: f32,
@@ -173,44 +196,48 @@ pub struct ManiaMmaBar {
     pub specific_types: Vec<(String, f32)>,
 }
 
-impl ManiaMmaAnalysis {
+fn to_f32_pairs(pairs: &[(String, f64)]) -> Vec<(String, f32)> {
+    pairs
+        .iter()
+        .map(|(name, ratio)| (name.clone(), *ratio as f32))
+        .collect()
+}
+
+impl KeyPatternAnalysis {
     pub fn into_record(
         self,
         beatmap_id: u64,
         beatmapset_id: u64,
         game_mod: ManiaGameMod,
-    ) -> ManiaMmaRecord {
-        let dominant = self
-            .report
-            .clusters
-            .first()
-            .map(|cluster| cluster.pattern.to_owned())
-            .unwrap_or_default();
-
-        ManiaMmaRecord {
+    ) -> KeyPatternRecord {
+        let report = self.report;
+        let features = self.features;
+        KeyPatternRecord {
             beatmap_id,
             beatmapset_id,
             game_mod,
             key_count: self.key_count,
-            mode_tag: self.report.mode_tag.to_owned(),
-            category: self.report.category.clone(),
-            dominant_pattern: dominant,
-            ln_note_ratio: self.report.ln_percent as f32,
-            hb_row_ratio: self.report.hb_row_ratio as f32,
-            sv_amount: self.report.sv_amount as f32,
-            duration_seconds: (self.report.duration / 1000.0) as f32,
-            coverage: self.features.coverage.map(|value| value as f32),
-            clusters: self
-                .report
+            mode_tag: report.mode_tag.to_owned(),
+            category: report.category,
+            dominant_pattern: report
+                .clusters
+                .first()
+                .map(|cluster| cluster.pattern.to_owned())
+                .unwrap_or_default(),
+            ln_note_ratio: report.ln_percent as f32,
+            hb_row_ratio: report.hb_row_ratio as f32,
+            // v3.0.0 measures SV time from the first note, so speed changes placed before it make
+            // the total negative (e.g. Ranked map 1940322 gives -921501 ms). Stored as 0, which
+            // keeps the same "not an SV chart" verdict and passes OPP's non-negative check.
+            sv_amount: report.sv_amount.max(0.0) as f32,
+            duration_seconds: (report.duration / 1000.0) as f32,
+            coverage: features.coverage.map(|value| value as f32),
+            clusters: report
                 .clusters
                 .iter()
-                .map(|cluster| ManiaMmaCluster {
+                .map(|cluster| KeyPatternCluster {
                     pattern: cluster.pattern.to_owned(),
-                    specific_types: cluster
-                        .specific_types
-                        .iter()
-                        .map(|(name, ratio)| (name.clone(), *ratio as f32))
-                        .collect(),
+                    specific_types: to_f32_pairs(&cluster.specific_types),
                     rating_multiplier: cluster.rating_multiplier as f32,
                     bpm: cluster.bpm as i32,
                     mixed: cluster.mixed,
@@ -218,57 +245,45 @@ impl ManiaMmaAnalysis {
                     importance: cluster.importance as f32,
                 })
                 .collect(),
-            bars: self
-                .features
+            bars: features
                 .bars
                 .iter()
-                .map(|bar| ManiaMmaBar {
+                .map(|bar| KeyPatternBar {
                     pattern: bar.pattern.to_owned(),
                     amount: bar.amount as f32,
                     bpm: bar.bpm as f32,
                     relative: bar.relative as f32,
-                    specific_types: bar
-                        .specific_types
-                        .iter()
-                        .map(|(name, ratio)| (name.clone(), *ratio as f32))
-                        .collect(),
+                    specific_types: to_f32_pairs(&bar.specific_types),
                 })
                 .collect(),
-            subtypes: self
-                .features
-                .subtypes
-                .iter()
-                .map(|(name, ratio)| (name.clone(), *ratio as f32))
-                .collect(),
-            intensity: self.features.intensity.map(|value| value as f32),
-            temporal: self.features.temporal.map(|value| value as f32),
-            variation: self.features.variation.map(|value| value as f32),
-            note_count: self.features.note_count,
-            row_count: self.features.row_count,
-            avg_nps: self.features.avg_nps as f32,
-            peak_nps: self.features.peak_nps as f32,
-            chord_rate: self.features.chord_rate as f32,
-            large_chord_rate: self.features.large_chord_rate as f32,
-            unclassified: self.features.unclassified as f32,
-            algorithm_version: MANIA_MMA_ALGORITHM_VERSION,
+            subtypes: to_f32_pairs(&features.subtypes),
+            intensity: features.intensity.map(|value| value as f32),
+            temporal: features.temporal.map(|value| value as f32),
+            variation: features.variation.map(|value| value as f32),
+            note_count: features.note_count,
+            row_count: features.row_count,
+            avg_nps: features.avg_nps as f32,
+            peak_nps: features.peak_nps as f32,
+            chord_rate: features.chord_rate as f32,
+            large_chord_rate: features.large_chord_rate as f32,
+            unclassified: features.unclassified as f32,
+            algorithm_version: KEY_PATTERN_RECORD_FORMAT,
         }
     }
 }
-
-/// Record format version; bump it whenever the field layout changes.
-pub const MANIA_MMA_ALGORITHM_VERSION: u32 = 2;
 
 pub fn analyze_record(
     text: &str,
     beatmap_id: u64,
     beatmapset_id: u64,
     game_mod: ManiaGameMod,
-) -> Result<ManiaMmaRecord> {
+) -> Result<KeyPatternRecord> {
     Ok(analyze(text, game_mod)?.into_record(beatmap_id, beatmapset_id, game_mod))
 }
-pub fn validate_record(record: &ManiaMmaRecord) -> Result<()> {
-    if record.algorithm_version != MANIA_MMA_ALGORITHM_VERSION {
-        bail!("mania key-pattern record has the wrong algorithm version");
+
+pub fn validate_record(record: &KeyPatternRecord) -> Result<()> {
+    if record.algorithm_version != KEY_PATTERN_RECORD_FORMAT {
+        bail!("mania key-pattern record has the wrong record format");
     }
     if !matches!(record.key_count, 4 | 6 | 7) {
         bail!("mania key-pattern record has an unsupported key count");

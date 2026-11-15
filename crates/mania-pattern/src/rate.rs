@@ -1,6 +1,7 @@
-//! Clock-rate transformation.
+//! Clock rates (NM/DT/HT) and stretching a chart to one.
 //!
-//! DT/HT features are re-analysed at the actual clock rate instead of scaling NoMod features.
+//! The stretched chart is only used for note density and time structure; key patterns are found at
+//! the original speed (see [`crate::analyze`]).
 
 use anyhow::{Result, bail};
 
